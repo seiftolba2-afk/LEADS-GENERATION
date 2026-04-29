@@ -16,7 +16,7 @@ function extractDomain(url) {
 // ─────────────────────────────────────────────────────────────
 async function serperPost(state, endpoint, body, timeoutMs = 10000) {
   const keys = state.config.SERPER_API_KEYS;
-  if (!state._serperKeyIdx) state._serperKeyIdx = 0;
+  if (state._serperKeyIdx === undefined) state._serperKeyIdx = 0;
   for (let i = state._serperKeyIdx; i < keys.length; i++) {
     try {
       const res = await fetch(`https://google.serper.dev/${endpoint}`, {

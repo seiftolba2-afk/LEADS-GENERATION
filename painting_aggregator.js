@@ -1,5 +1,5 @@
 'use strict';
-const { run } = require('./aggregator_core');
+const { run } = require('./agents/agent_orchestrator');
 
 run({
   INDUSTRY_NAME: 'Painting',

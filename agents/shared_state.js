@@ -103,6 +103,7 @@ function createSharedState(config) {
     scrapeCache:   new Map(),    // in-run only
     progress:      { namedLeads: [], resumed: 0 },
     hitRates:      {},           // layerName → { attempts, hits }
+    _serperKeyIdx: 0,
     serperLimit:   createLimit(6),
     scraperLimit:  createLimit(4),
     leadLimit:     createLimit(8),
