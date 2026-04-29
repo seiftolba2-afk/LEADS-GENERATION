@@ -1,0 +1,13 @@
+node_modules/
+*.xlsx
+*.csv
+*.zip
+*.docx
+seen_companies*.json
+waterfall_cache.json
+leads.db
+tasks/run_log.txt
+.env
+package-lock.json
+.DS_Store
+.claude/

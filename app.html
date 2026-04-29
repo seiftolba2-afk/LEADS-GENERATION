@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lead Generator</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:32px 16px}
+h1{font-size:22px;font-weight:700;margin-bottom:28px;color:#f0f6fc}
+h1 span{color:#58a6ff}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:28px;width:100%;max-width:760px;margin-bottom:20px}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+.row:last-child{margin-bottom:0}
+label{font-size:13px;color:#8b949e;min-width:80px}
+.tabs{display:flex;gap:8px}
+.tab{padding:8px 20px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#8b949e;cursor:pointer;font-size:14px;font-weight:500;transition:all .15s}
+.tab.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.tab:hover:not(.active){border-color:#58a6ff;color:#58a6ff}
+input[type=number]{background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:8px;padding:8px 14px;font-size:14px;width:110px;outline:none}
+input[type=number]:focus{border-color:#58a6ff}
+.btns{display:flex;gap:10px}
+button{padding:9px 22px;border-radius:8px;border:none;font-size:14px;font-weight:600;cursor:pointer;transition:all .15s}
+#btnRun{background:#238636;color:#fff}
+#btnRun:hover:not(:disabled){background:#2ea043}
+#btnRun:disabled{background:#21262d;color:#484f58;cursor:not-allowed}
+#btnStop{background:#da3633;color:#fff;display:none}
+#btnStop:hover{background:#f85149}
+#btnOpen{background:#1f6feb;color:#fff;display:none}
+#btnOpen:hover{background:#388bfd}
+.log-wrap{background:#010409;border:1px solid #21262d;border-radius:8px;height:380px;overflow-y:auto;padding:14px 16px;font-family:'Cascadia Code','Consolas','Courier New',monospace;font-size:12.5px;line-height:1.7}
+.log-wrap p{margin:0;white-space:pre-wrap;word-break:break-all}
+.ok{color:#3fb950}.fail{color:#f85149}.info{color:#58a6ff}.dim{color:#484f58}.chk{color:#e3b341}
+.bar-wrap{margin-top:14px;background:#21262d;border-radius:6px;height:8px;overflow:hidden}
+.bar{height:100%;background:#238636;width:0%;transition:width .4s}
+.status{font-size:13px;color:#8b949e;margin-top:8px;min-height:20px}
+.done-banner{display:none;background:#0f2918;border:1px solid #238636;border-radius:8px;padding:14px 18px;color:#3fb950;font-size:14px;font-weight:600;margin-top:16px}
+.done-banner.show{display:block}
+</style>
+</head>
+<body>
+
+<h1>🏠 <span>Lead Generator</span></h1>
+
+<div class="card">
+  <div class="row">
+    <label>Industry</label>
+    <div class="tabs">
+      <div class="tab active" data-ind="roofing">🏠 Roofing</div>
+      <div class="tab" data-ind="solar">☀️ Solar</div>
+      <div class="tab" data-ind="hvac">❄️ HVAC</div>
+    </div>
+  </div>
+  <div class="row">
+    <label>Leads</label>
+    <input type="number" id="count" value="300" min="10" max="900" step="10">
+    <span style="font-size:12px;color:#484f58">max 900</span>
+  </div>
+  <div class="row">
+    <div class="btns">
+      <button id="btnRun">&#9654; Generate Leads</button>
+      <button id="btnStop">&#9632; Stop</button>
+      <button id="btnReset" style="background:#21262d;color:#8b949e;border:1px solid #30363d">&#8635; Reset</button>
+      <button id="btnOpen">&#11123; Download Excel</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div id="logBox" class="log-wrap"><p class="dim">Output will appear here when you start a run...</p></div>
+  <div class="bar-wrap"><div class="bar" id="bar"></div></div>
+  <div class="status" id="status"></div>
+</div>
+
+<div class="done-banner" id="doneBanner">&#10003; Run complete! File saved to D:\LEADS GENERATION</div>
+
+<script>
+var industry = 'roofing';
+var es = null;
+var found = 0;
+var target = 300;
+var lastInd = 'roofing';
+var lastCnt = 300;
+var poolSize = 0;
+
+document.querySelectorAll('.tab').forEach(function(t) {
+  t.addEventListener('click', function() {
+    document.querySelectorAll('.tab').forEach(function(x){ x.classList.remove('active'); });
+    t.classList.add('active');
+    industry = t.getAttribute('data-ind');
+  });
+});
+
+function log(text, cls) {
+  var box = document.getElementById('logBox');
+  var p = document.createElement('p');
+  p.textContent = text;
+  if (cls) p.className = cls;
+  box.appendChild(p);
+  box.scrollTop = box.scrollHeight;
+}
+
+function classFor(line) {
+  if (line.indexOf('no name') !== -1 || line.indexOf('Error') !== -1) return 'fail';
+  if (line.indexOf('Checkpoint') !== -1 || line.indexOf('saved') !== -1) return 'chk';
+  if (line.indexOf('[Maps]') !== -1 || line.indexOf('Starting') !== -1) return 'info';
+  if (line.indexOf('found') !== -1 && line.indexOf('[Maps]') !== -1) return 'info';
+  return '';
+}
+
+function setRunning(on) {
+  document.getElementById('btnRun').disabled = on;
+  document.getElementById('btnStop').style.display = on ? 'inline-block' : 'none';
+}
+
+function updateBar(cur, tot) {
+  if (tot > 0) {
+    document.getElementById('bar').style.width = Math.min(100, Math.round(cur / tot * 100)) + '%';
+    document.getElementById('status').textContent = 'Processing ' + cur + ' of ' + tot + ' candidates...';
+  }
+}
+
+document.getElementById('btnRun').addEventListener('click', function() {
+  target = parseInt(document.getElementById('count').value) || 300;
+  lastInd = industry;
+  lastCnt = target;
+
+  poolSize = 0;
+  document.getElementById('logBox').innerHTML = '';
+  document.getElementById('doneBanner').classList.remove('show');
+  document.getElementById('btnOpen').style.display = 'none';
+  document.getElementById('bar').style.width = '0%';
+  document.getElementById('status').textContent = 'Connecting...';
+  setRunning(true);
+
+  log('Starting ' + target + ' ' + industry + ' leads...', 'info');
+
+  // Open SSE stream first
+  if (es) { es.close(); es = null; }
+  es = new EventSource('/stream');
+
+  es.addEventListener('message', function(e) {
+    var msg;
+    try { msg = JSON.parse(e.data); } catch(err) { msg = e.data; }
+
+    if (typeof msg === 'string' && msg.indexOf('__DONE__') === 0) {
+      var parts = msg.split(':');
+      setRunning(false);
+      es.close();
+      document.getElementById('bar').style.width = '100%';
+      var poolNote = poolSize > 0 ? ' (best ' + parts[2] + ' from ' + poolSize + ' enriched)' : '';
+      document.getElementById('status').textContent = 'Done — ' + parts[2] + ' leads saved' + poolNote;
+      document.getElementById('doneBanner').innerHTML = '&#10003; Run complete!  Best <strong>' + parts[2] + '</strong> leads selected from a pool of <strong>' + (poolSize || parts[2]) + '</strong> enriched leads.';
+      document.getElementById('doneBanner').classList.add('show');
+      document.getElementById('btnOpen').style.display = 'inline-block';
+      document.getElementById('btnOpen').setAttribute('data-industry', parts[1]);
+      document.getElementById('btnOpen').setAttribute('data-count', parts[2]);
+      return;
+    }
+
+    var lines = (typeof msg === 'string' ? msg : '').split('\n');
+    lines.forEach(function(line) {
+      if (!line.trim()) return;
+      // Capture pool size silently — don't show in log
+      if (line.indexOf('__POOL__') === 0) {
+        var p = line.split(':');
+        poolSize = parseInt(p[1]) || 0;
+        return;
+      }
+      // Parse processing progress from [X/Y] pattern
+      var prog = line.match(/\[\s*(\d+)\/(\d+)\]/);
+      if (prog) updateBar(parseInt(prog[1]), parseInt(prog[2]));
+      // Parse named count — update status only, strip from log
+      var namedM = line.match(/__NAMED__:(\d+)/);
+      if (namedM) {
+        document.getElementById('status').textContent = 'Processing... ' + parseInt(namedM[1]) + ' leads named so far';
+        line = line.replace(/\s*__NAMED__:\d+/, '');
+      }
+      log(line, classFor(line));
+    });
+  });
+
+  es.addEventListener('error', function() {
+    log('Stream error — retrying...', 'fail');
+  });
+
+  // Trigger the run after SSE is open
+  setTimeout(function() {
+    fetch('/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ industry: industry, count: target })
+    }).then(function(r) {
+      if (!r.ok) {
+        r.text().then(function(t){ log('Server error: ' + t, 'fail'); setRunning(false); });
+      } else {
+        document.getElementById('status').textContent = 'Running...';
+      }
+    }).catch(function(err) {
+      log('Fetch error: ' + err.message, 'fail');
+      setRunning(false);
+    });
+  }, 300);
+});
+
+document.getElementById('btnReset').addEventListener('click', function() {
+  fetch('/reset', { method: 'POST' }).then(function() {
+    if (es) { es.close(); es = null; }
+    setRunning(false);
+    document.getElementById('status').textContent = 'Reset. Ready to run.';
+    document.getElementById('logBox').innerHTML = '<p class="dim">Reset complete — ready for a new run.</p>';
+  });
+});
+
+document.getElementById('btnStop').addEventListener('click', function() {
+  fetch('/stop', { method: 'POST' });
+  if (es) { es.close(); es = null; }
+  setRunning(false);
+  document.getElementById('status').textContent = 'Stopped.';
+  log('Stopped by user.', 'fail');
+});
+
+document.getElementById('btnOpen').addEventListener('click', function() {
+  var ind = this.getAttribute('data-industry');
+  var cnt = this.getAttribute('data-count');
+  window.location.href = '/download?industry=' + ind + '&count=' + cnt;
+});
+</script>
+</body>
+</html>
