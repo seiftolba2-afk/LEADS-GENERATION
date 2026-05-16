@@ -10,7 +10,7 @@ run({
     'renovation contractor',
     'home improvement company',
   ],
-  OUTPUT_FILE:   'D:\\LEADS GENERATION\\SAMPLE_GENERAL.xlsx',
+  OUTPUT_FILE:   require('path').join(__dirname, 'out', 'General.xlsx'),
   PROGRESS_FILE: 'D:\\LEADS GENERATION\\leads_general_progress.csv',
   SEEN_FILE:     'D:\\LEADS GENERATION\\seen_companies_general.json',
 });

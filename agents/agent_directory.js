@@ -6,18 +6,13 @@ const { serperPost, extractName, splitSafe } = require('./agent_serper');
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function fetchSafe(url, options = {}) {
-  for (let attempt = 0; attempt <= 2; attempt++) {
-    try {
-      const res = await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
-      if (res.status === 429) { await sleep(1500 * (attempt + 1)); continue; }
-      if (!res.ok) return null;
-      return await res.text();
-    } catch {
-      if (attempt === 2) return null;
-      await sleep(1000);
-    }
+  try {
+    const res = await fetch(url, { ...options, signal: AbortSignal.timeout(4000) });
+    if (!res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
   }
-  return null;
 }
 
 async function duckSearch(query) {
@@ -80,7 +75,7 @@ async function bbbSearch(state, companyName, city) {
 
 async function angiSearch(state, companyName, city) {
   try {
-    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:angi.com "${companyName}" ${city}`, gl: 'us', hl: 'en', num: 3 }));
+    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:angi.com "${companyName}" ${city} owner`, gl: 'us', hl: 'en', num: 3 }));
     if (!res || !res.ok) return null;
     const data = await res.json();
     for (const r of (data.organic || [])) {
@@ -104,7 +99,7 @@ async function houzzSearch(state, companyName, city) {
 
 async function thumbtackSearch(state, companyName, city) {
   try {
-    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:thumbtack.com "${companyName}" ${city}`, gl: 'us', hl: 'en', num: 3 }));
+    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:thumbtack.com "${companyName}" ${city} owner`, gl: 'us', hl: 'en', num: 3 }));
     if (!res || !res.ok) return null;
     const data = await res.json();
     for (const r of (data.organic || [])) {
@@ -134,8 +129,26 @@ async function tripAdvisorSearch(state, companyName, city) {
 
 async function facebookSearch(state, companyName, city) {
   try {
-    const results = await duckSearch(`site:facebook.com "${companyName}" ${city} owner OR founder`);
+    const results = await duckSearch(`"${companyName}" "${city}" (owner OR founder OR "managing member") site:facebook.com`);
     for (const r of results) { const n = extractName(`${r.title} ${r.snippet}`); if (n) return n; }
+  } catch { }
+  return null;
+}
+
+async function getFbFollowers(state, companyName, city) {
+  const clean = companyName.replace(/,?\s*(Inc|LLC|Co|Corp|Ltd)\.?/gi, '').trim();
+  try {
+    const res = await state.serperLimit(() => serperPost(state, 'search', {
+      q: `site:facebook.com "${clean}" "${city}" followers`, gl: 'us', hl: 'en', num: 3,
+    }));
+    if (!res || !res.ok) return null;
+    const data = await res.json();
+    for (const r of (data.organic || [])) {
+      if (!r.link?.includes('facebook.com')) continue;
+      const snippet = `${r.title || ''} ${r.snippet || ''}`;
+      const fm = snippet.match(/([\d,]+)\s+(?:followers?|likes?)/i);
+      if (fm) return parseInt(fm[1].replace(/,/g, ''));
+    }
   } catch { }
   return null;
 }
@@ -144,4 +157,5 @@ module.exports = {
   mantaSearch, porchSearch, bbbSearch,
   angiSearch, houzzSearch, thumbtackSearch,
   yelpSearch, tripAdvisorSearch, facebookSearch,
+  getFbFollowers,
 };

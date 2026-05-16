@@ -1,6 +1,7 @@
 'use strict';
 // Agent Serper — Google Maps city fetch + L1 name search (4 queries + DDG/Brave fallback)
 
+const cheerio = require('cheerio');
 const { recordAttempt, recordHit } = require('./shared_state');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -12,11 +13,16 @@ function extractDomain(url) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// SERPER POST (dual-key failover, shared serperKeyIdx via state)
+// SERPER POST — key cycling → router fallbacks (Brave→DDG→SB) → keygen
 // ─────────────────────────────────────────────────────────────
 async function serperPost(state, endpoint, body, timeoutMs = 10000) {
-  const keys = state.config.SERPER_API_KEYS;
+  const KeyManager = require('../key_manager');
+  const router     = require('../search_router');
+  const keys       = state.config.SERPER_API_KEYS || [];
+
   if (state._serperKeyIdx === undefined) state._serperKeyIdx = 0;
+
+  // 1. Try each configured Serper key
   for (let i = state._serperKeyIdx; i < keys.length; i++) {
     try {
       const res = await fetch(`https://google.serper.dev/${endpoint}`, {
@@ -25,18 +31,44 @@ async function serperPost(state, endpoint, body, timeoutMs = 10000) {
         body:    JSON.stringify(body),
         signal:  AbortSignal.timeout(timeoutMs),
       });
-      if (res.ok) return res;
-      if ((res.status === 401 || res.status === 403 || res.status === 429) && i < keys.length - 1) {
-        console.warn(`[Serper] Key ${i} → ${res.status}, switching to backup`);
-        state._serperKeyIdx = i + 1;
-        continue;
-      }
-      return res;
-    } catch (e) {
-      if (i === keys.length - 1) throw e;
-      state._serperKeyIdx = i + 1;
-    }
+      if (res.ok) return { ok: true, source: 'serper', json: async () => res.json() };
+      if (res.status === 429)                       { KeyManager.markQuota(keys[i]); state._serperKeyIdx = i + 1; continue; }
+      if (res.status === 401 || res.status === 403) { KeyManager.markDead(keys[i]);  state._serperKeyIdx = i + 1; continue; }
+    } catch { state._serperKeyIdx = i + 1; }
   }
+
+  // 2. Fallback chain: Brave → DDG → ScrapingBee (via router)
+  const type     = endpoint === 'maps' ? 'maps' : 'web';
+  const fallback = await router.search(body.q, type, { ...state.config, _serperKeyIdx: state._serperKeyIdx }, body.num || 10);
+  if (fallback.ok) return { ok: true, source: 'serper', json: async () => fallback.data };
+
+  // 3. Auto-keygen — only if not paused and all keys exhausted
+  if (state._serperKeyIdx >= keys.length && (!state._keygenPausedUntil || Date.now() > state._keygenPausedUntil)) {
+    console.log('🔄 [Serper] All keys exhausted — launching auto key generator...');
+    try {
+      const { generateSerperKey } = require('./key_generator');
+      const newKey = await generateSerperKey();
+      if (newKey) {
+        const addResult = await KeyManager.addKey(newKey);
+        if (addResult === 'duplicate') {
+          state._keygenDups = (state._keygenDups || 0) + 1;
+          console.log(`[Keygen] DUPLICATE KEY — signup failed silently, skipping (${state._keygenDups}/3)`);
+          if (state._keygenDups >= 3) {
+            console.log('[Keygen] 🛑 3 consecutive failures — pausing keygen for 2 hours');
+            state._keygenPausedUntil = Date.now() + 2 * 60 * 60 * 1000;
+            state._keygenDups = 0;
+          }
+        } else if (addResult === 'ok') {
+          state._keygenDups = 0;
+          state.config.SERPER_API_KEYS.push(newKey);
+          state._serperKeyIdx = state.config.SERPER_API_KEYS.length - 1;
+          return await serperPost(state, endpoint, body, timeoutMs);
+        }
+      }
+    } catch {}
+  }
+
+  return { ok: false, status: 429 };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -113,9 +145,9 @@ function splitSafe(full) {
 function extractName(text) {
   if (!text) return null;
   const pats = [
-    /(?:[Oo]wner|[Ff]ounder|[Cc][Ee][Oo]|[Pp]resident|[Pp]rincipal|[Oo]perator|[Pp]roprietor|[Cc]o-owner|[Mm]anaging [Pp]artner)[\s\-:]+(?:[Mm]r\.?\s*|[Mm]rs\.?\s*|[Mm]s\.?\s*)?([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+){1,2})/g,
+    /(?:[Oo]wner|[Ff]ounder|[Cc][Ee][Oo]|[Pp]resident|[Pp]rincipal|[Oo]perator|[Pp]roprietor|[Cc]o-owner|[Mm]anaging [Pp]artner|[Mm]anaging [Mm]ember)[\s\-:]+(?:[Mm]r\.?\s*|[Mm]rs\.?\s*|[Mm]s\.?\s*)?([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+){1,2})/g,
     /([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+){1,2})[,\s\-|]+(?:[Oo]wner|[Ff]ounder|[Cc][Ee][Oo]|[Pp]resident|[Pp]rincipal)/g,
-    /(?:[Ff]ounded|[Oo]wned|[Ss]tarted|[Oo]perated|[Ll]ed|[Ee]stablished)\s+by\s+([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+){1,2})/g,
+    /(?:[Ff]ounded|[Oo]wned|[Ss]tarted|[Oo]perated|[Ll]ed|[Ee]stablished|[Rr]un)\s+by\s+([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+){1,2})/g,
     /(?:I['']m|[Mm]y name is)\s+([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+){1,2})/g,
   ];
   for (const p of pats) {
@@ -134,9 +166,9 @@ async function serperNameSearch(state, companyName, city) {
   const industry = state.config.INDUSTRY_NAME || '';
   const clean    = companyName.replace(/,?\s*(Inc|LLC|Co|Corp|Ltd)\.?/gi, '').trim();
   const queries  = [
-    `"${clean}" "${city}" (owner OR founder OR president) ${industry} -jobs -careers`,
+    `"${clean}" "${city}" (owner OR founder OR president OR "managing member") ${industry} -jobs -hiring`,
     `site:bbb.org "${clean}" ${city} principal`,
-    `"${clean}" ${city} ${industry} (owner OR founder) -job`,
+    `"${clean}" "${city}" ("owned by" OR "founded by" OR "run by" OR "operated by")`,
     `site:linkedin.com "${clean}" ${city} owner`,
   ];
 
@@ -161,7 +193,14 @@ async function serperNameSearch(state, companyName, city) {
     try {
       const res = await state.serperLimit(() => serperPost(state, 'search', { q, gl: 'us', hl: 'en', num: 5 }));
       if (!res || !res.ok) return null;
-      return parseResult(await res.json());
+      const data = await res.json();
+      
+      if (res.source === 'scrapingbee') {
+        // SB format conversion
+        const organic = (data.organic_results || []).map(r => ({ title: r.title, snippet: r.description, link: r.url }));
+        return parseResult({ organic });
+      }
+      return parseResult(data);
     } catch { return null; }
   }));
 
@@ -186,7 +225,7 @@ async function phoneSearch(state, phone) {
   if (digits.length < 10) return null;
   const fmt = `(${digits.substr(0,3)}) ${digits.substr(3,3)}-${digits.substr(6,4)}`;
   try {
-    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `"${fmt}" (owner OR founder OR president) -jobs`, gl: 'us', hl: 'en', num: 5 }));
+    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `"${fmt}" (owner OR founder OR president OR "managing member") -jobs -"for sale" -"for rent"`, gl: 'us', hl: 'en', num: 5 }));
     if (!res || !res.ok) return null;
     const data = await res.json();
     for (const r of (data.organic || [])) {
@@ -199,8 +238,8 @@ async function phoneSearch(state, phone) {
 // Email search (called from agent_scraper when email still missing)
 async function serperEmailSearch(state, companyName, city, domain) {
   const queries = [
-    `"${companyName}" ${city} email`,
-    domain ? `site:${domain} email contact` : null,
+    `"${companyName}" "${city}" contact email -jobs -indeed -glassdoor`,
+    domain ? `site:${domain} (email OR contact)` : null,
   ].filter(Boolean);
   for (const q of queries) {
     try {
@@ -223,6 +262,49 @@ async function serperEmailSearch(state, companyName, city, domain) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// SCRAPINGBEE MAPS FALLBACK — direct place search when Serper is dead
+// ─────────────────────────────────────────────────────────────
+async function fetchCityViaSB(state, city, stateAbbr, stateFull, seenTitles) {
+  const sbKey       = state.config.SCRAPINGBEE_API_KEY;
+  const baseQueries = state.config.QUERIES || ['contractor'];
+  const results     = [];
+
+  for (const q of baseQueries.slice(0, 2)) {
+    try {
+      const query  = `${q} ${city} ${stateAbbr}`;
+      const sbUrl  = `https://app.scrapingbee.com/api/v1/google/?api_key=${sbKey}&q=${encodeURIComponent(query)}&gl=us&hl=en&nb_results=20&search_type=place`;
+      const res    = await fetch(sbUrl, { signal: AbortSignal.timeout(25000) });
+      if (!res.ok) { await sleep(500); continue; }
+      const data   = await res.json();
+      const places = data.local_results || data.places || [];
+      for (const p of places) {
+        const key = (p.title || p.name || '').toLowerCase().trim();
+        if (!key || seenTitles.has(key)) continue;
+        seenTitles.add(key);
+        results.push({
+          source:         'google_maps',
+          first_name: '', last_name: '', full_name: '',
+          email:          '',
+          phone:          p.phone || p.phoneNumber || '',
+          job_title:      'Owner',
+          company_name:   p.title || p.name || '',
+          company_domain: extractDomain(p.website || p.url || ''),
+          location_city:  city,
+          location_state: stateFull,
+          linkedin_url:   '',
+          google_rating:  p.rating || '',
+          review_count:   parseInt(p.reviews || p.ratingCount || 0) || 0,
+          _website:       p.website || p.url || '',
+        });
+      }
+    } catch {}
+    await sleep(500);
+  }
+  if (results.length) console.log(`  [ScrapingBee Maps fallback] ${city}: ${results.length} found`);
+  return results;
+}
+
+// ─────────────────────────────────────────────────────────────
 // GOOGLE MAPS CITY FETCH
 // ─────────────────────────────────────────────────────────────
 async function fetchCity(state, city, stateAbbr, stateFull) {
@@ -234,9 +316,11 @@ async function fetchCity(state, city, stateAbbr, stateFull) {
   for (const q of queries) {
     try {
       const res = await state.serperLimit(() => serperPost(state, 'maps', { q, gl: 'us', hl: 'en', num: 20 }, 15000));
-      if (!res || !res.ok) { console.log(`  ⚠️  ${city} [${q}]: HTTP ${res?.status}`); await sleep(400); continue; }
-      const data = await res.json();
-      for (const p of (data.places || [])) {
+      if (!res || !res.ok) { await sleep(400); continue; }
+      const data   = await res.json();
+      const places = data.places || [];
+
+      for (const p of places) {
         const key = (p.title || '').toLowerCase().trim();
         if (!key || seenTitles.has(key)) continue;
         seenTitles.add(key);
@@ -259,6 +343,13 @@ async function fetchCity(state, city, stateAbbr, stateFull) {
     } catch (e) { console.log(`  ⚠️  ${city}: ${e.message}`); }
     await sleep(400);
   }
+
+  // ScrapingBee Maps fallback — fires when Serper returned 0 results for this city
+  if (all.length === 0 && state.config.SCRAPINGBEE_API_KEY) {
+    const sbResults = await fetchCityViaSB(state, city, stateAbbr, stateFull, seenTitles);
+    all.push(...sbResults);
+  }
+
   console.log(`  ${city}, ${stateAbbr}: ${all.length} unique (${queries.length} queries)`);
   return all;
 }

@@ -1,14 +1,17 @@
 'use strict';
-// Agent Output — scoring, CSV progress, Excel output, stats sheet
+// Agent Output — scoring, DB/CSV progress, Excel output, stats sheet
 
 const xlsx = require('xlsx');
 const fs   = require('fs');
+const path = require('path');
+const { loadLeadsProgress, appendLead, clearProgress } = require('../db');
 
 const HEADERS = [
   'lead_id','source','first_name','last_name','full_name',
-  'email','phone','job_title','company_name','company_domain',
-  'location_city','location_state','linkedin_url',
-  'google_rating','review_count','lead_score','score_reason','name_source','status',
+  'email','phone','phone_type','job_title','company_name','company_domain',
+  'location_city','location_state','linkedin_url','facebook_followers',
+  'google_rating','review_count','lead_score','score_reason','name_source','status','scraped_date',
+  'trigger_signal','domain_age_days','review_velocity','completeness_pct',
 ];
 
 // ─────────────────────────────────────────────────────────────
@@ -17,6 +20,9 @@ const HEADERS = [
 function scoreLead(lead, nameLayer) {
   let score = 10;
   const reasons = ['Owner name', 'Has phone'];
+
+  if (lead.source === 'facebook')      { score += 3; reasons.push('FB-sourced'); }
+  else if (lead.source === 'linkedin') { score += 1; reasons.push('LI-sourced'); }
 
   if (lead.email)                                         { score += 2; reasons.push('Email found'); }
   if (parseFloat(lead.google_rating) >= 4.5)             { score += 1; reasons.push('Top rated'); }
@@ -30,39 +36,42 @@ function scoreLead(lead, nameLayer) {
     if (hiConf.includes(nameLayer))        { score += 2; reasons.push('High-conf name'); }
     else if (loConf.includes(nameLayer))   { score -= 1; }
   }
+
+  const fb = (lead.facebook_followers !== null && lead.facebook_followers !== undefined)
+    ? parseInt(lead.facebook_followers) : -1;
+  if (fb >= 0 && fb < 200)         { score += 2; reasons.push('Micro-biz FB'); }
+  else if (fb >= 200 && fb <= 1000) { score += 1; reasons.push('Small FB'); }
+
+  if (lead.linkedin_url) { score += 1; reasons.push('LinkedIn found'); }
+
+  if (lead.phone_type === 'mobile')        { score += 2; reasons.push('Mobile phone'); }
+  else if (lead.phone_type === 'landline') { score -= 1; reasons.push('Landline'); }
+
+  if (lead.trigger_signal === 'hot_trigger')          { score += 2; reasons.push('Hot trigger'); }
+  else if (lead.trigger_signal === 'new_biz')         { score += 1; reasons.push('New biz'); }
+  else if (lead.trigger_signal === 'recently_active') { score += 1; reasons.push('Active biz'); }
+
+  const rv = parseFloat(lead.review_velocity);
+  if (!isNaN(rv) && rv > 8)      { score += 2; reasons.push('High velocity'); }
+  else if (!isNaN(rv) && rv > 3) { score += 1; reasons.push('Growing'); }
+
   return { score, reason: reasons.join(', ') };
 }
 
 // ─────────────────────────────────────────────────────────────
-// CSV PROGRESS
+// DB PROGRESS (replaces CSV)
 // ─────────────────────────────────────────────────────────────
-function csvRow(lead) { return HEADERS.map(h => `"${String(lead[h] ?? '').replace(/"/g,'""')}"`).join(','); }
-
 function initProgressFile(config) {
-  fs.writeFileSync(config.PROGRESS_FILE, HEADERS.join(',') + '\n', 'utf8');
+  clearProgress(config.INDUSTRY_ID);
 }
 
 function appendToProgress(config, lead) {
-  try { fs.appendFileSync(config.PROGRESS_FILE, csvRow(lead) + '\n', 'utf8'); }
-  catch (e) { console.log(`  ⚠️  CSV write error: ${e.message}`); }
+  try { appendLead(config.INDUSTRY_ID, lead); }
+  catch (e) { console.log(`  ⚠️  DB write error: ${e.message}`); }
 }
 
 function loadProgress(config) {
-  if (!fs.existsSync(config.PROGRESS_FILE)) return { leads: [], done: new Set() };
-  const lines = fs.readFileSync(config.PROGRESS_FILE, 'utf8').trim().split('\n');
-  if (lines.length <= 1) return { leads: [], done: new Set() };
-  const hdrs  = lines[0].split(',').map(h => h.replace(/"/g,'').trim());
-  const leads = lines.slice(1).map(line => {
-    const row = {}; let inQ = false, val = '', col = 0;
-    for (const ch of line) {
-      if (ch === '"') inQ = !inQ;
-      else if (ch === ',' && !inQ) { row[hdrs[col]] = val; val = ''; col++; }
-      else val += ch;
-    }
-    row[hdrs[col]] = val;
-    return row;
-  });
-  return { leads, done: new Set(leads.map(l => (l.company_name || '').toLowerCase().trim())) };
+  return loadLeadsProgress(config.INDUSTRY_ID);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -107,6 +116,10 @@ function buildStatsSheet(allLeads, hotLeads, industry) {
   all.forEach(l => { byCities[l.location_city] = (byCities[l.location_city] || 0) + 1; });
   const topCities = Object.entries(byCities).sort((a,b) => b[1]-a[1]).slice(0,10);
 
+  const mobile   = all.filter(l => l.phone_type === 'mobile').length;
+  const landline = all.filter(l => l.phone_type === 'landline').length;
+  const verified = all.filter(l => l.phone_type).length;
+
   const rows = [
     { Metric: `${industry} Lead Run`, Value: new Date().toLocaleDateString() },
     { Metric: 'Hot Leads',            Value: hotLeads.length },
@@ -118,25 +131,71 @@ function buildStatsSheet(allLeads, hotLeads, industry) {
     { Metric: 'Email Rate',           Value: all.length ? `${Math.round(emailed/all.length*100)}%` : '0%' },
     { Metric: 'Avg Lead Score',       Value: avgScore },
     { Metric: '', Value: '' },
+    { Metric: 'Phone Verified',       Value: verified },
+    { Metric: 'Mobile',               Value: mobile },
+    { Metric: 'Landline',             Value: landline },
+    { Metric: 'Mobile Rate',          Value: verified ? `${Math.round(mobile/verified*100)}%` : 'N/A' },
+    { Metric: '', Value: '' },
     { Metric: 'Top Cities', Value: 'Count' },
     ...topCities.map(([c, n]) => ({ Metric: c, Value: n })),
   ];
   return xlsx.utils.json_to_sheet(rows, { header: ['Metric','Value'] });
 }
 
-function saveExcel(config, allLeads, hotLeads) {
+function saveManualReview(config, leads) {
+  if (!leads || !leads.length) return;
   const wb = xlsx.utils.book_new();
-  xlsx.utils.book_append_sheet(wb, toSheet(hotLeads), 'Hot Leads');
-  xlsx.utils.book_append_sheet(wb, toSheet(allLeads), 'All Leads');
+  xlsx.utils.book_append_sheet(wb, toSheet(leads), 'Manual Review');
+  const file = config.OUTPUT_FILE.replace('.xlsx', '_manual_review.xlsx');
+  try {
+    xlsx.writeFile(wb, file);
+    console.log(`📋 Manual review → ${file} (${leads.length} leads with phone but no name)`);
+  } catch (e) {
+    if (e.code === 'EBUSY') console.error(`❌ Close the manual review file first.`);
+    else console.error(`❌ Manual review save error: ${e.message}`);
+  }
+}
+
+function saveExcel(config, allLeads, hotLeads, sheetName) {
+  const dir = path.dirname(config.OUTPUT_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  const combined = [...hotLeads, ...allLeads];
+  combined.sort((a, b) => (b.lead_score || 0) - (a.lead_score || 0));
+
+  const QM = (config.PHONE_QUOTAS || {}).mobile   ?? 200;
+  const QV = (config.PHONE_QUOTAS || {}).voip     ?? 100;
+  const QL = (config.PHONE_QUOTAS || {}).landline  ?? 100;
+
+  const wireless = combined.filter(l => l.phone_type === 'mobile').slice(0, QM);
+  const voip     = combined.filter(l => l.phone_type === 'voip').slice(0, QV);
+  const landline = combined.filter(l => l.phone_type === 'landline').slice(0, QL);
+
+  const finalLeads = [...wireless, ...voip, ...landline];
+  const wb = xlsx.utils.book_new();
+  
+  // Split into sheets of 400
+  const CHUNK_SIZE = 400;
+  for (let i = 0; i < finalLeads.length; i += CHUNK_SIZE) {
+    const chunk = finalLeads.slice(i, i + CHUNK_SIZE);
+    const sheetNum = Math.floor(i / CHUNK_SIZE) + 1;
+    xlsx.utils.book_append_sheet(wb, toSheet(chunk), `B2B Leads ${sheetNum}`);
+  }
+
   xlsx.utils.book_append_sheet(wb, buildStatsSheet(allLeads, hotLeads, config.INDUSTRY_NAME), 'Stats');
+
   try {
     xlsx.writeFile(wb, config.OUTPUT_FILE);
-    console.log(`\n✅ Saved → ${config.OUTPUT_FILE}`);
-    console.log(`   Hot Leads : ${hotLeads.length} | All Leads : ${allLeads.length} | Total : ${hotLeads.length + allLeads.length}`);
+    console.log(`\n🏆 ELITE QUOTA OUTPUT SAVED → ${config.OUTPUT_FILE}`);
+    console.log(`   📱 Wireless: ${wireless.length}/${QM} | 📞 VOIP: ${voip.length}/${QV} | ☎️ Landline: ${landline.length}/${QL}`);
+    const target = QM + QV + QL;
+    if (finalLeads.length < target) {
+      console.log(`   💡 Keep running to fill the remaining ${target - finalLeads.length} slots.`);
+    }
   } catch (e) {
     if (e.code === 'EBUSY') console.error(`\n❌ Close the Excel file first, then run again.`);
     else console.error(`\n❌ Save error: ${e.message}`);
   }
 }
 
-module.exports = { scoreLead, saveExcel, toSheet, buildStatsSheet, initProgressFile, appendToProgress, loadProgress, HEADERS };
+module.exports = { scoreLead, saveExcel, saveManualReview, toSheet, buildStatsSheet, initProgressFile, appendToProgress, loadProgress, HEADERS };

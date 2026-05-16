@@ -1,6 +1,7 @@
 'use strict';
 const fs   = require('fs');
 const path = require('path');
+const { loadSeenSet, saveSeenBatch } = require('../db');
 
 // ─────────────────────────────────────────────────────────────
 // CONCURRENCY LIMITER (same impl as aggregator_core)
@@ -59,13 +60,12 @@ function setCached(state, domain, data) {
 // SEEN COMPANIES (cross-run dedup)
 // ─────────────────────────────────────────────────────────────
 function loadSeenCompanies(config) {
-  try { return new Set(JSON.parse(fs.readFileSync(config.SEEN_FILE, 'utf8'))); }
-  catch { return new Set(); }
+  return loadSeenSet(config.INDUSTRY_ID);
 }
 
 function saveSeenCompanies(config, seenSet, newKeys) {
   newKeys.forEach(k => seenSet.add(k));
-  fs.writeFileSync(config.SEEN_FILE, JSON.stringify([...seenSet]), 'utf8');
+  saveSeenBatch(config.INDUSTRY_ID, [...new Set(newKeys)]);
 }
 
 // ─────────────────────────────────────────────────────────────

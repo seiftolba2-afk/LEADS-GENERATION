@@ -13,10 +13,10 @@ const industries = [
   'local_aggregator.js',
   'solar_aggregator.js',
   'hvac_aggregator.js',
-  'plumbing_aggregator.js',
   'electrical_aggregator.js',
-  'landscaping_aggregator.js',
+  'plumbing_aggregator.js',
   'painting_aggregator.js',
+  'landscaping_aggregator.js',
   'general_contracting_aggregator.js',
 ];
 

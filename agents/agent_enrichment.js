@@ -6,18 +6,13 @@ const { splitSafe } = require('./agent_serper');
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function fetchSafe(url, options = {}) {
-  for (let attempt = 0; attempt <= 2; attempt++) {
-    try {
-      const res = await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
-      if (res.status === 429) { await sleep(1500 * (attempt + 1)); continue; }
-      if (!res.ok) return null;
-      return await res.text();
-    } catch {
-      if (attempt === 2) return null;
-      await sleep(1000);
-    }
+  try {
+    const res = await fetch(url, { ...options, signal: AbortSignal.timeout(4000) });
+    if (!res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
   }
-  return null;
 }
 
 const STATE_CODES = {

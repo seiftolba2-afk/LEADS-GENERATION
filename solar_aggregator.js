@@ -5,12 +5,12 @@ run({
   INDUSTRY_NAME: 'Solar',
   INDUSTRY_ID:   'SL',
   QUERIES: [
-    'solar panel installation',
-    'solar energy company',
-    'solar installer',
-    'residential solar',
+    'residential solar installer',
+    'solar panel installation company',
+    'home solar system installer',
+    'solar energy contractor',
   ],
-  OUTPUT_FILE:   'D:\\LEADS GENERATION\\SAMPLE_SOLAR.xlsx',
+  OUTPUT_FILE:   require('path').join(__dirname, 'out', 'Solar.xlsx'),
   PROGRESS_FILE: 'D:\\LEADS GENERATION\\leads_solar_progress.csv',
   SEEN_FILE:     'D:\\LEADS GENERATION\\seen_companies_solar.json',
 });

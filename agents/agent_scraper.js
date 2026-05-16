@@ -2,7 +2,6 @@
 // Agent Scraper — website scrape (L2a/2b) + full findOwner orchestration
 // Calls all layer agents in sequence and returns { name, email, linkedin_url, nameLayer }
 
-const dns = require('dns').promises;
 const { getCached, setCached, recordAttempt, recordHit } = require('./shared_state');
 const { serperNameSearch, phoneSearch, serperEmailSearch, splitSafe, extractName } = require('./agent_serper');
 const { mantaSearch, porchSearch }    = require('./agent_directory');
@@ -48,41 +47,35 @@ function extractEmail(text) {
   return null;
 }
 
-async function verifyEmailDomain(email) {
-  if (!email) return false;
-  const domain = email.split('@')[1];
-  if (!domain) return false;
-  try { const r = await dns.resolveMx(domain); return r && r.length > 0; }
-  catch { return false; }
-}
-
 // ─────────────────────────────────────────────────────────────
 // L2a — WEBSITE SCRAPE
 // ─────────────────────────────────────────────────────────────
 async function fetchSafe(url, options = {}) {
-  for (let attempt = 0; attempt <= 2; attempt++) {
-    try {
-      const res = await fetch(url, { ...options, signal: AbortSignal.timeout(15000) });
-      if (res.status === 429) { await sleep(1500 * (attempt + 1)); continue; }
-      if (!res.ok) return null;
-      return await res.text();
-    } catch {
-      if (attempt === 2) return null;
-      await sleep(1000);
-    }
+  try {
+    const res = await fetch(url, { ...options, signal: AbortSignal.timeout(4000) });
+    if (!res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
   }
-  return null;
 }
 
 async function scrapeSite(state, domain) {
   if (state.scrapeCache.has(domain)) return state.scrapeCache.get(domain);
   let foundName = null, foundEmail = null;
-  const paths = ['/contact', '/contact-us', '/', '/about', '/about-us', '/our-team', '/team'];
+  const sbKey = state.config?.SCRAPINGBEE_API_KEY || '';
+  const paths = ['/', '/about', '/contact', '/team'];
   for (const p of paths) {
     if (foundName && foundEmail) break;
-    const html = await state.scraperLimit(() => fetchSafe(`https://${domain}${p}`, {
+    let html = await state.scraperLimit(() => fetchSafe(`https://${domain}${p}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': 'text/html,*/*;q=0.8' },
     }));
+    // Fallback to ScrapingBee for JS-heavy sites (thin response = JS-rendered)
+    if (sbKey && (!html || html.length < 500)) {
+      const sbUrl = `https://app.scrapingbee.com/api/v1/?api_key=${sbKey}&url=${encodeURIComponent(`https://${domain}${p}`)}&render_js=false&block_ads=true`;
+      html = await state.scraperLimit(() => fetchSafe(sbUrl));
+      await sleep(300);
+    }
     if (!html || html.length < 100) continue;
     if (!foundEmail) foundEmail = extractEmail(html);
     const text = html.replace(/<(script|style|nav|footer|header|aside)[^>]*>[\s\S]*?<\/\1>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
@@ -244,4 +237,4 @@ async function findOwner(state, lead) {
   return { name, email, linkedin_url: linkedinUrl, nameLayer };
 }
 
-module.exports = { findOwner, scrapeSite, verifyEmailDomain, extractEmail, emailPrefix };
+module.exports = { findOwner, scrapeSite, extractEmail, emailPrefix };

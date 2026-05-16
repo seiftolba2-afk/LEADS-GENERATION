@@ -12,12 +12,15 @@ h1 span{color:#58a6ff}
 .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
 .row:last-child{margin-bottom:0}
 label{font-size:13px;color:#8b949e;min-width:80px}
-.tabs{display:flex;gap:8px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}
 .tab{padding:8px 20px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#8b949e;cursor:pointer;font-size:14px;font-weight:500;transition:all .15s}
 .tab.active{background:#1f6feb;border-color:#1f6feb;color:#fff}
 .tab:hover:not(.active){border-color:#58a6ff;color:#58a6ff}
-input[type=number]{background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:8px;padding:8px 14px;font-size:14px;width:110px;outline:none}
-input[type=number]:focus{border-color:#58a6ff}
+input[type=number],input[type=text]{background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:8px;padding:8px 14px;font-size:14px;outline:none}
+input[type=number]{width:110px}
+input[type=text]{width:220px}
+input[type=number]:focus,input[type=text]:focus{border-color:#58a6ff}
+input[type=text]::placeholder{color:#484f58}
 .btns{display:flex;gap:10px}
 button{padding:9px 22px;border-radius:8px;border:none;font-size:14px;font-weight:600;cursor:pointer;transition:all .15s}
 #btnRun{background:#238636;color:#fff}
@@ -48,12 +51,21 @@ button{padding:9px 22px;border-radius:8px;border:none;font-size:14px;font-weight
       <div class="tab active" data-ind="roofing">🏠 Roofing</div>
       <div class="tab" data-ind="solar">☀️ Solar</div>
       <div class="tab" data-ind="hvac">❄️ HVAC</div>
+      <div class="tab" data-ind="electrical">⚡ Electrical</div>
+      <div class="tab" data-ind="plumbing">🔧 Plumbing</div>
+      <div class="tab" data-ind="painting">🎨 Painting</div>
+      <div class="tab" data-ind="landscaping">🌿 Landscaping</div>
+      <div class="tab" data-ind="general">🏗️ General</div>
     </div>
   </div>
   <div class="row">
     <label>Leads</label>
-    <input type="number" id="count" value="300" min="10" max="900" step="10">
+    <input type="number" id="count" value="100" min="10" max="900" step="10">
     <span style="font-size:12px;color:#484f58">max 900</span>
+  </div>
+  <div class="row">
+    <label>Batch name</label>
+    <input type="text" id="batchName" placeholder="e.g. Austin April — names the sheet in Excel">
   </div>
   <div class="row">
     <div class="btns">
@@ -61,6 +73,7 @@ button{padding:9px 22px;border-radius:8px;border:none;font-size:14px;font-weight
       <button id="btnStop">&#9632; Stop</button>
       <button id="btnReset" style="background:#21262d;color:#8b949e;border:1px solid #30363d">&#8635; Reset</button>
       <button id="btnOpen">&#11123; Download Excel</button>
+      <button id="btnWhop" style="background:#7c3aed;color:#fff;margin-left:8px">&#128722; List on Whop</button>
     </div>
   </div>
 </div>
@@ -77,9 +90,9 @@ button{padding:9px 22px;border-radius:8px;border:none;font-size:14px;font-weight
 var industry = 'roofing';
 var es = null;
 var found = 0;
-var target = 300;
+var target = 100;
 var lastInd = 'roofing';
-var lastCnt = 300;
+var lastCnt = 100;
 var poolSize = 0;
 
 document.querySelectorAll('.tab').forEach(function(t) {
@@ -120,7 +133,7 @@ function updateBar(cur, tot) {
 }
 
 document.getElementById('btnRun').addEventListener('click', function() {
-  target = parseInt(document.getElementById('count').value) || 300;
+  target = parseInt(document.getElementById('count').value) || 100;
   lastInd = industry;
   lastCnt = target;
 
@@ -188,7 +201,7 @@ document.getElementById('btnRun').addEventListener('click', function() {
     fetch('/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ industry: industry, count: target })
+      body: JSON.stringify({ industry: industry, count: target, batchName: (document.getElementById('batchName').value || '').trim() })
     }).then(function(r) {
       if (!r.ok) {
         r.text().then(function(t){ log('Server error: ' + t, 'fail'); setRunning(false); });
@@ -223,6 +236,14 @@ document.getElementById('btnOpen').addEventListener('click', function() {
   var ind = this.getAttribute('data-industry');
   var cnt = this.getAttribute('data-count');
   window.location.href = '/download?industry=' + ind + '&count=' + cnt;
+});
+
+document.getElementById('btnWhop').addEventListener('click', function() {
+  if (!confirm('Launch Chrome to list ALL.xlsx on Whop.com ($60)?\n\nMake sure ALL.xlsx is ready and Chrome is closed first.')) return;
+  fetch('/whop', { method: 'POST' }).then(function(r) {
+    if (r.ok) log('Chrome launched — complete the Whop listing in the browser window.', 'ok');
+    else log('Failed to launch Whop automation.', 'fail');
+  });
 });
 </script>
 </body>

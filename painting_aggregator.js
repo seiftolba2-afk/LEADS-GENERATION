@@ -10,7 +10,7 @@ run({
     'painting company',
     'interior exterior painter',
   ],
-  OUTPUT_FILE:   'D:\\LEADS GENERATION\\SAMPLE_PAINTING.xlsx',
+  OUTPUT_FILE:   require('path').join(__dirname, 'out', 'Painting.xlsx'),
   PROGRESS_FILE: 'D:\\LEADS GENERATION\\leads_painting_progress.csv',
   SEEN_FILE:     'D:\\LEADS GENERATION\\seen_companies_painting.json',
 });

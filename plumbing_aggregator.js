@@ -10,7 +10,7 @@ run({
     'plumbing company',
     'drain cleaning service',
   ],
-  OUTPUT_FILE:   'D:\\LEADS GENERATION\\SAMPLE_PLUMBING.xlsx',
+  OUTPUT_FILE:   require('path').join(__dirname, 'out', 'Plumbing.xlsx'),
   PROGRESS_FILE: 'D:\\LEADS GENERATION\\leads_plumbing_progress.csv',
   SEEN_FILE:     'D:\\LEADS GENERATION\\seen_companies_plumbing.json',
 });

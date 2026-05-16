@@ -10,7 +10,7 @@ run({
     'landscape contractor',
     'lawn maintenance',
   ],
-  OUTPUT_FILE:   'D:\\LEADS GENERATION\\SAMPLE_LANDSCAPING.xlsx',
+  OUTPUT_FILE:   require('path').join(__dirname, 'out', 'Landscaping.xlsx'),
   PROGRESS_FILE: 'D:\\LEADS GENERATION\\leads_landscaping_progress.csv',
   SEEN_FILE:     'D:\\LEADS GENERATION\\seen_companies_landscaping.json',
 });

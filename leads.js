@@ -1,6 +1,5 @@
 const xlsx = require('xlsx');
 const fs   = require('fs');
-const dns  = require('dns').promises;
 
 // ================================================================
 // LEADS.JS — On-demand lead generator
@@ -489,7 +488,6 @@ async function fetchGoogleMapsLeads(city, state, stateFull) {
         google_maps_url:  mapsUrl,
         company_domain:   extractDomain(b.website || ''),
         competitor_count: competitorCount,
-        _reviews:         [],
       };
     });
   } catch (e) {
@@ -543,25 +541,28 @@ async function findOwnerName(lead) {
     }
   }
 
-  // Layer 4 — reviews
-  if (lead._reviews?.length > 0) {
-    const r = extractFromReviews(lead._reviews);
-    if (r.firstName) return r;
-  }
-
-  // Layers 5 + 6 + 7 — Serper search + License DB + Facebook in parallel
+  // Layers 5 + 6 + 7 — sequential to avoid burning Serper credits when earlier layers hit
+  // LicenseDB is free (direct HTTP); Serper + Facebook each cost 1 credit
   if (lead.company_name) {
-    const [searchResult, licenseResult, fbResult] = await Promise.all([
-      serperSearch(lead.company_name, lead.city),
-      lead.stateFull ? stateLicenseDB(lead.company_name, lead.stateFull) : Promise.resolve(empty),
-      facebookSearch(lead.company_name, lead.city),
-    ]);
-    const fb      = fbResult.followers;
-    const fbPhone = fbResult.phone || null;
-    if (licenseResult.firstName) return { ...licenseResult, facebook_followers: fb, facebook_phone: fbPhone };
-    if (searchResult.firstName)  return { ...searchResult,  facebook_followers: fb, facebook_phone: fbPhone };
-    if (fbResult.firstName)      return { ...fbResult,      facebook_followers: fb, facebook_phone: fbPhone };
-    return { ...empty, facebook_followers: fb, facebook_phone: fbPhone };
+    const licenseResult = lead.stateFull
+      ? await stateLicenseDB(lead.company_name, lead.stateFull)
+      : empty;
+
+    if (licenseResult.firstName) {
+      // Got a high-confidence name — still fetch FB for followers/phone
+      const fbR = await facebookSearch(lead.company_name, lead.city);
+      return { ...licenseResult, facebook_followers: fbR.followers, facebook_phone: fbR.phone || null };
+    }
+
+    const searchResult = await serperSearch(lead.company_name, lead.city);
+    if (searchResult.firstName) {
+      const fbR = await facebookSearch(lead.company_name, lead.city);
+      return { ...searchResult, facebook_followers: fbR.followers, facebook_phone: fbR.phone || null };
+    }
+
+    const fbResult = await facebookSearch(lead.company_name, lead.city);
+    if (fbResult.firstName) return { ...fbResult, facebook_followers: fbResult.followers, facebook_phone: fbResult.phone || null };
+    return { ...empty, facebook_followers: fbResult.followers, facebook_phone: fbResult.phone || null };
   }
 
   return empty;
@@ -630,32 +631,6 @@ function extractBlogByline(text) {
   return { firstName: '', lastName: '', name: '' };
 }
 
-function extractFromReviews(reviews) {
-  const ownerPatterns = [
-    /(?:[Oo]wner|founder|president)\s+([A-Z][A-Za-z']+)/g,
-    /([A-Z][A-Za-z']+)\s+(?:is\s+the\s+owner|the\s+owner)/g,
-    /([A-Z][A-Za-z']+)\s+himself\s+came/g,
-  ];
-  const counts = {}, snippets = {};
-  for (const review of reviews.slice(0, 30)) {
-    const text = typeof review === 'string' ? review : (review.text || review.review_text || '');
-    if (!text) continue;
-    for (const p of ownerPatterns) {
-      p.lastIndex = 0;
-      let m;
-      while ((m = p.exec(text)) !== null) {
-        const nm = m[1];
-        if (isRealPersonName(nm, '')) {
-          counts[nm]  = (counts[nm] || 0) + 1;
-          if (!snippets[nm]) snippets[nm] = text.substring(0, 150);
-        }
-      }
-    }
-  }
-  if (!Object.keys(counts).length) return { firstName: '', lastName: '', name: '' };
-  const [best, count] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
-  return { firstName: best, lastName: '', name: best, confidence: 'google_review', notes: `Reviews: '${best}' x${count}` };
-}
 
 async function serperSearch(companyName, city) {
   const clean = companyName.replace(/,?\s*(Inc|LLC|Co|Corp|Ltd)\.?/gi, '').trim();
@@ -757,20 +732,6 @@ function maybeReturnName(fullName, confidence) {
   const ln = rest.join(' ');
   if (!isRealPersonName(fn, ln)) return { firstName: '', lastName: '', name: '' };
   return { firstName: fn, lastName: ln, name: fullName.trim(), confidence, notes: 'State license DB' };
-}
-
-// ────────────────────────────────────────────────────────────────
-// EMAIL GUESSER — pattern-based, MX-validated
-// ────────────────────────────────────────────────────────────────
-function guessEmails(firstName, lastName, domain) {
-  if (!domain || !firstName) return '';
-  const fn = firstName.toLowerCase().replace(/[^a-z]/g, '');
-  const ln = (lastName || '').toLowerCase().replace(/[^a-z]/g, '');
-  if (!fn) return '';
-  const patterns = ln
-    ? [`${fn}@${domain}`, `${fn}.${ln}@${domain}`, `${fn[0]}${ln}@${domain}`, `${fn[0]}.${ln}@${domain}`]
-    : [`${fn}@${domain}`];
-  return patterns.join(' | ');
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -994,6 +955,7 @@ async function run() {
   // PHASE 3 — parallel waterfall
   console.log(`🔍  Finding owner names (10 at a time) — target: ${TARGET}...\n`);
   const named = [];
+  let dropped = 0;
 
   for (let i = 0; i < leads.length; i += CONFIG.BATCH_SIZE) {
     const batch = leads.slice(i, Math.min(i + CONFIG.BATCH_SIZE, leads.length));
@@ -1038,7 +1000,7 @@ async function run() {
       if (!bestPhone && CONFIG.ABSTRACT_PHONE_KEY) {
         process.stdout.write('📵 all phones landline — skipped\n');
         dropped++;
-        return;
+        continue;
       }
       if (!bestPhone) {
         bestPhone   = phoneCandidates[0]?.phone   || '';

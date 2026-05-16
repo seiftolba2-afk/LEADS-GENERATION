@@ -5,12 +5,12 @@ run({
   INDUSTRY_NAME: 'Roofing',
   INDUSTRY_ID:   'RF',
   QUERIES: [
-    'roofing contractors',
-    'roofing company',
-    'roof repair',
-    'roofing services',
+    'residential roofing contractor',
+    'roof repair service',
+    'local roofing company',
+    'roof replacement contractor',
   ],
-  OUTPUT_FILE:   'D:\\LEADS GENERATION\\SAMPLE.xlsx',
+  OUTPUT_FILE:   require('path').join(__dirname, 'out', 'Roofing.xlsx'),
   PROGRESS_FILE: 'D:\\LEADS GENERATION\\leads_progress.csv',
   SEEN_FILE:     'D:\\LEADS GENERATION\\seen_companies.json',
 });

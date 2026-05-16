@@ -798,7 +798,11 @@ const HEADERS = [
   'google_rating','review_count','lead_score','score_reason','name_source','status',
 ];
 
-function csvRow(lead) { return HEADERS.map(h => `"${String(lead[h] ?? '').replace(/"/g,'""')}"`).join(','); }
+function csvSafe(v) {
+  const s = String(v ?? '').replace(/"/g, '""');
+  return /^[=+\-@\t\r]/.test(s) ? `"'${s}"` : `"${s}"`;
+}
+function csvRow(lead) { return HEADERS.map(h => csvSafe(lead[h])).join(','); }
 function initProgressFile() { fs.writeFileSync(CONFIG.PROGRESS_FILE, HEADERS.join(',') + '\n', 'utf8'); }
 function appendToProgress(lead) {
   try { fs.appendFileSync(CONFIG.PROGRESS_FILE, csvRow(lead) + '\n', 'utf8'); }
@@ -948,7 +952,7 @@ async function fetchCity(city, state, stateFull) {
 async function run(industryConfig) {
   // Reset module state for this run
   CONFIG       = {
-    SERPER_API_KEYS:     ['ac3ba31464ca33e206915f63702be12c05123834', '6a7afb68c82beebd2dea190244c386e2bc09c296'],
+    SERPER_API_KEYS:     ['c21c3794e99931d1e98e28e400a63b932eee6924', 'f71038304481e8349ce67a01cbfc9739f84616a3', 'f7214593bd0fc35ab1f4fcd49bce360c3070d377'],
     SCRAPINGBEE_API_KEY: 'CXBUX27L6I5GVSLD0VOCI2WY1X2KMN7UWYWO5HF3LZMILEOZFWDAWBMLM2LP39C254BD0YXBL9WX0EPB',
     BRAVE_API_KEY:       '',
     HOT_COUNT:           100,
