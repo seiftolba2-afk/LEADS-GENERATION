@@ -189,35 +189,8 @@ async function getTempEmail() {
     return activeEmail;
   }
 
-  // dropmail.me — anonymous GraphQL-based inbox, relatively obscure
-  if (!dropmailBlocked) {
-    try {
-      const r = await axiosNoVerify.post(
-        'https://dropmail.me/api/graphql/web-test-wGNPFj0p',
-        { query: 'mutation { introduceSession { id, addresses { address } } }' },
-        { timeout: 10000, headers: { 'Content-Type': 'application/json' } }
-      );
-      const addr = r.data?.data?.introduceSession?.addresses?.[0]?.address;
-      if (addr) {
-        dropmailSessionId = r.data.data.introduceSession.id;
-        activeProvider    = 'dropmail';
-        activeEmail       = addr;
-        activeLogin       = addr.split('@')[0];
-        console.log(`[TempMail] dropmail.me: ${addr}`);
-        return addr;
-      }
-    } catch {}
-  }
-
-  // maildrop.cc — username-based inbox, no signup, not widely blocklisted
-  if (!maildropBlocked) {
-    const mdLogin = 'serper' + Math.floor(Math.random() * 99999);
-    activeProvider = 'maildrop';
-    activeEmail    = `${mdLogin}@maildrop.cc`;
-    activeLogin    = mdLogin;
-    console.log(`[TempMail] maildrop.cc: ${activeEmail}`);
-    return activeEmail;
-  }
+  // dropmail.me — API unreachable from most IPs; kept as stub, skipped by default
+  // maildrop.cc  — v2 API returns 404; kept as stub, skipped by default
 
   // All providers exhausted
   console.log('[TempMail] ❌ ALL providers blocked — cannot get a temp email this run');
