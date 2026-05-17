@@ -673,6 +673,103 @@ async function handleTurnstile(page, cursor) {
   } catch {}
 }
 
+// ── 2captcha reCAPTCHA v2 solver ─────────────────────────────────────────────
+// Set TWOCAPTCHA_API_KEY env var. $0.001/solve — deposit $3 at 2captcha.com.
+async function solve2captcha(page, apiKey) {
+  try {
+    const sitekey = await page.evaluate(() => {
+      const el = document.querySelector('[data-sitekey]');
+      return el?.getAttribute('data-sitekey') || null;
+    }).catch(() => null);
+
+    if (!sitekey) { console.log('   [2captcha] No sitekey on page — skipping'); return false; }
+
+    const pageUrl = page.url();
+    console.log(`   [2captcha] Submitting task (sitekey: ${sitekey.slice(0, 20)}...)...`);
+
+    const sub = await axiosNoVerify.post('https://2captcha.com/in.php', null, {
+      params: { key: apiKey, method: 'userrecaptcha', googlekey: sitekey, pageurl: pageUrl, json: 1 },
+      timeout: 10000,
+    });
+    if (sub.data.status !== 1) { console.log(`   [2captcha] Submit failed: ${sub.data.request}`); return false; }
+
+    const taskId = sub.data.request;
+    console.log(`   [2captcha] Task ${taskId} — polling...`);
+
+    for (let p = 0; p < 30; p++) {
+      await sleep(5000);
+      const poll = await axiosNoVerify.get('https://2captcha.com/res.php', {
+        params: { key: apiKey, action: 'get', id: taskId, json: 1 }, timeout: 10000,
+      });
+      if (poll.data.request === 'CAPCHA_NOT_READY') { if (p % 3 === 0) process.stdout.write('.'); continue; }
+      if (poll.data.status !== 1) { console.log(`\n   [2captcha] Error: ${poll.data.request}`); return false; }
+
+      const token = poll.data.request;
+      console.log(`\n   [2captcha] Got token — injecting...`);
+
+      await page.evaluate((t) => {
+        // Inject into hidden textarea that reCAPTCHA reads
+        const ta = document.querySelector('[name="g-recaptcha-response"]') ||
+                   document.querySelector('#g-recaptcha-response');
+        if (ta) {
+          ta.style.display = 'block';
+          const nset = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+          if (nset) nset.call(ta, t); else ta.value = t;
+          ta.dispatchEvent(new Event('change', { bubbles: true }));
+          ta.dispatchEvent(new Event('input',  { bubbles: true }));
+        }
+        // Fire data-callback if present (e.g. custom reCAPTCHA submit handler)
+        const widget = document.querySelector('[data-callback]');
+        if (widget) {
+          const cb = widget.getAttribute('data-callback');
+          if (cb && typeof window[cb] === 'function') window[cb](t);
+        }
+      }, token).catch(() => {});
+
+      await sleep(1000);
+      return true;
+    }
+    console.log('\n   [2captcha] Timed out (150s)');
+    return false;
+  } catch (e) {
+    console.log(`   [2captcha] Error: ${e.message}`);
+    return false;
+  }
+}
+
+// ── IMAP inbox poller (for custom domain email via Gmail / any IMAP server) ──
+// Env vars: KEYGEN_IMAP_HOST (default: imap.gmail.com), KEYGEN_IMAP_USER, KEYGEN_IMAP_PASS
+// For Gmail: create an App Password at myaccount.google.com/apppasswords (2FA must be on)
+async function pollImapInbox() {
+  const user = process.env.KEYGEN_IMAP_USER;
+  const pass = process.env.KEYGEN_IMAP_PASS;
+  if (!user || !pass) return null;
+
+  const host = process.env.KEYGEN_IMAP_HOST || 'imap.gmail.com';
+  try {
+    const { ImapFlow } = require('imapflow');
+    const client = new ImapFlow({ host, port: 993, secure: true, auth: { user, pass }, logger: false });
+    await client.connect();
+    const lock = await client.getMailboxLock('INBOX');
+    let verifyLink = null;
+    try {
+      const since = new Date(Date.now() - 15 * 60 * 1000); // last 15 min
+      const uids  = await client.search({ from: 'serper', since });
+      for (const uid of uids.slice(-5)) {
+        const msg = await client.fetchOne(uid, { bodyStructure: true, source: true });
+        const body = msg.source?.toString() || '';
+        const m = body.match(/https:\/\/serper\.dev\/verify-email\?token=[^\s'"<>&\r\n]+/);
+        if (m) { verifyLink = m[0].replace(/=\r?\n/g, ''); break; } // unwrap quoted-printable
+      }
+    } finally { lock.release(); }
+    await client.logout();
+    return verifyLink;
+  } catch (e) {
+    console.log(`[IMAP] Error: ${e.message}`);
+    return null;
+  }
+}
+
 // ── Browser-based inbox check (fallback when API fails) ──────────────────────
 async function checkEmailsInBrowser(browser, email, provider, sidToken, login) {
   let tab;
@@ -1162,17 +1259,17 @@ async function generateSerperKey() {
       }
 
       // Extension solved detector — check every 3 ticks if reCAPTCHA token appeared.
-      // If an extension (or human) solved the puzzle, a non-empty g-recaptcha-response appears.
-      // We then click submit immediately to finish the signup.
-      // Wait 5 mins (300000) for manual solve before falling back to audio bypass.
-      const extWaitDone = (Date.now() - lastSubmitTime) > 300000;
+      // With 2captcha key: wait 60s then fire solver. Without: wait 300s for manual/NopeCHA.
+      const twoCaptchaKey  = process.env.TWOCAPTCHA_API_KEY;
+      const extWaitMs      = twoCaptchaKey ? 60000 : 300000;
+      const extWaitDone    = (Date.now() - lastSubmitTime) > extWaitMs;
       if (url.includes('signup') && i % 3 === 0 && !extWaitDone) {
         const token = await page.evaluate(() => {
           const el = document.querySelector('[name="g-recaptcha-response"]');
           return el?.value || '';
         }).catch(() => '');
         if (token.length > 20) {
-          console.log('🤖 [NopeCHA] reCAPTCHA solved! Submitting form...');
+          console.log('🤖 [Extension] reCAPTCHA solved! Submitting form...');
           await clickButton(page, cursor, 'Create account');
           lastSubmitTime = Date.now();
           await jitter(2000, 3000);
@@ -1253,15 +1350,27 @@ async function generateSerperKey() {
           continue;
         }
 
-        // Google reCAPTCHA v2 handling:
-        // Wait 5 minutes (300s) for manual solve.
-        // We'll play a beep so the user knows it's ready.
-        if (i % 6 === 0 && (Date.now() - lastSubmitTime) < 300000) {
-           process.stdout.write('\x07'); // Terminal beep
-           console.log('🚨 [MANUAL ASSIST] Please solve the image puzzle in the browser! Waiting...');
+        // reCAPTCHA solving chain: 2captcha → audio bypass → IP rotate
+        if (i % 6 === 0 && !extWaitDone && !twoCaptchaKey) {
+          process.stdout.write('\x07');
+          console.log('🚨 [MANUAL ASSIST] No 2captcha key — solve the image puzzle manually, or set TWOCAPTCHA_API_KEY.');
         }
-        
+
         if (url.includes('signup') && i % 3 === 0 && extWaitDone) {
+          // Step 1: 2captcha (fast, reliable, ~$0.001/solve)
+          if (twoCaptchaKey) {
+            const solved = await solve2captcha(page, twoCaptchaKey);
+            if (solved) {
+              console.log('   [2captcha] Injected — submitting form...');
+              await clickButton(page, cursor, 'Create account');
+              lastSubmitTime = Date.now();
+              await sleep(3000);
+              continue;
+            }
+            console.log('   [2captcha] Failed — falling back to audio bypass...');
+          }
+
+          // Step 2: wit.ai audio bypass
           const captchaResult = await solveRecaptchaV2(page);
           if (captchaResult === 'ROTATE_IP' || captchaResult === false) {
             console.log('[Windscribe] reCAPTCHA failed/hard-blocked — rotating IP...');
@@ -1304,6 +1413,21 @@ async function generateSerperKey() {
             if (verifyLink) {
               console.log('[Auto-Key] getedumail verification link found — clicking...');
               await page.goto(verifyLink);
+              await jitter(4000, 6000);
+              await page.goto('https://serper.dev/api-keys');
+              await page.waitForSelector('text/API Key', { timeout: 10000 }).catch(() => {});
+              const html = await page.content();
+              const km   = html.match(/[a-f0-9]{40}/);
+              if (km) { newKey = km[0]; break; }
+            }
+          }
+
+          // IMAP polling — fires for custom domain email when KEYGEN_IMAP_USER is set
+          if (process.env.KEYGEN_IMAP_USER) {
+            const imapLink = await pollImapInbox();
+            if (imapLink) {
+              console.log('[IMAP] Verification link found — clicking...');
+              await page.goto(imapLink);
               await jitter(4000, 6000);
               await page.goto('https://serper.dev/api-keys');
               await page.waitForSelector('text/API Key', { timeout: 10000 }).catch(() => {});
