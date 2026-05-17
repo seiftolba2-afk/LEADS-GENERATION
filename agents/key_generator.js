@@ -90,9 +90,11 @@ let mailnesiaBlocked  = false;
 let mohmalBlocked     = false;
 let dispostableBlocked = false;
 let yopmailBlocked    = false; // set true when yopmail also hits "not possible to register"
-let dropmailBlocked   = false;
-let maildropBlocked   = false;
-let dropmailSessionId = '';
+let dropmailBlocked      = false;
+let maildropBlocked      = false;
+let dropmailSessionId    = '';
+let firefoxRelayBlocked  = false;
+let simpleloginBlocked   = false;
 
 let getuduDomainIdx     = 0;  // which domain index to use in the getedumail <select>
 let geteduDomainOptions = []; // populated on first openGetedumail call
@@ -108,6 +110,41 @@ async function getTempEmail() {
     activeProvider = 'custom';
     console.log(`[TempMail] Custom email (env): ${activeEmail}`);
     return activeEmail;
+  }
+
+  // Firefox Relay — generates a random @mozmail.com alias, forwards to your real inbox
+  // Free tier: 5 masks. Get token: relay.firefox.com → Settings → API token
+  // Verification lands in your real inbox → IMAP poller picks it up automatically
+  if (process.env.FIREFOX_RELAY_TOKEN && !firefoxRelayBlocked) {
+    try {
+      const r = await axiosNoVerify.post('https://relay.firefox.com/api/v1/relayaddresses/', {},
+        { headers: { Authorization: `Token ${process.env.FIREFOX_RELAY_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 10000 }
+      );
+      if (r.data?.full_address) {
+        activeEmail    = r.data.full_address;
+        activeLogin    = r.data.address;
+        activeProvider = 'custom'; // forwards to real inbox → IMAP handles it
+        console.log(`[TempMail] Firefox Relay: ${activeEmail}`);
+        return activeEmail;
+      }
+    } catch (e) { console.log(`[TempMail] Firefox Relay error: ${e.message}`); }
+  }
+
+  // SimpleLogin — generates a random alias, forwards to your real inbox
+  // Free tier: 15 aliases/month. Get key: simplelogin.io → Settings → API Keys
+  if (process.env.SIMPLELOGIN_API_KEY && !simpleloginBlocked) {
+    try {
+      const r = await axiosNoVerify.post('https://app.simplelogin.io/api/alias/random/new', {},
+        { headers: { Authentication: process.env.SIMPLELOGIN_API_KEY }, timeout: 10000 }
+      );
+      if (r.data?.email) {
+        activeEmail    = r.data.email;
+        activeLogin    = r.data.email.split('@')[0];
+        activeProvider = 'custom'; // forwards to real inbox → IMAP handles it
+        console.log(`[TempMail] SimpleLogin: ${activeEmail}`);
+        return activeEmail;
+      }
+    } catch (e) { console.log(`[TempMail] SimpleLogin error: ${e.message}`); }
   }
 
   // Guerrillamail first — reliable sid_token API (skip if already blocked by Serper)
@@ -713,12 +750,38 @@ async function solve2captcha(page, apiKey) {
 // ── IMAP inbox poller (for custom domain email via Gmail / any IMAP server) ──
 // Env vars: KEYGEN_IMAP_HOST (default: imap.gmail.com), KEYGEN_IMAP_USER, KEYGEN_IMAP_PASS
 // For Gmail: create an App Password at myaccount.google.com/apppasswords (2FA must be on)
+// Host auto-detected from email domain — no KEYGEN_IMAP_HOST needed for common providers:
+//   Gmail / Googlemail → imap.gmail.com       (App Password required — myaccount.google.com/apppasswords)
+//   Outlook / Hotmail / Live → imap-mail.outlook.com
+//   Yahoo → imap.mail.yahoo.com               (App Password required)
+//   Zoho → imap.zoho.com
+//   cock.li / firemail.cc / cumallover.me → imap.cock.li  (free, private, unlikely blocklisted)
+//   iCloud → imap.mail.me.com                 (App-specific password required)
+const IMAP_HOST_PRESETS = {
+  'gmail.com':       'imap.gmail.com',
+  'googlemail.com':  'imap.gmail.com',
+  'outlook.com':     'imap-mail.outlook.com',
+  'hotmail.com':     'imap-mail.outlook.com',
+  'live.com':        'imap-mail.outlook.com',
+  'msn.com':         'imap-mail.outlook.com',
+  'yahoo.com':       'imap.mail.yahoo.com',
+  'yahoo.co.uk':     'imap.mail.yahoo.com',
+  'zoho.com':        'imap.zoho.com',
+  'cock.li':         'imap.cock.li',
+  'firemail.cc':     'imap.cock.li',
+  'cumallover.me':   'imap.cock.li',
+  'airmail.cc':      'imap.cock.li',
+  'icloud.com':      'imap.mail.me.com',
+  'me.com':          'imap.mail.me.com',
+};
+
 async function pollImapInbox() {
   const user = process.env.KEYGEN_IMAP_USER;
   const pass = process.env.KEYGEN_IMAP_PASS;
   if (!user || !pass) return null;
 
-  const host = process.env.KEYGEN_IMAP_HOST || 'imap.gmail.com';
+  const domain = user.split('@')[1] || '';
+  const host   = process.env.KEYGEN_IMAP_HOST || IMAP_HOST_PRESETS[domain] || 'imap.gmail.com';
   try {
     const { ImapFlow } = require('imapflow');
     const client = new ImapFlow({ host, port: 993, secure: true, auth: { user, pass }, logger: false });
@@ -989,9 +1052,11 @@ async function generateSerperKey() {
   mohmalBlocked      = false;
   dispostableBlocked = false;
   yopmailBlocked     = false;
-  dropmailBlocked    = false;
-  maildropBlocked    = false;
-  dropmailSessionId  = '';
+  dropmailBlocked     = false;
+  maildropBlocked     = false;
+  dropmailSessionId   = '';
+  firefoxRelayBlocked = false;
+  simpleloginBlocked  = false;
   gmDomainIdx        = 0;
   getuduDomainIdx    = 0;
   geteduDomainOptions = [];
