@@ -90,6 +90,9 @@ let mailnesiaBlocked  = false;
 let mohmalBlocked     = false;
 let dispostableBlocked = false;
 let yopmailBlocked    = false; // set true when yopmail also hits "not possible to register"
+let dropmailBlocked   = false;
+let maildropBlocked   = false;
+let dropmailSessionId = '';
 
 let getuduDomainIdx     = 0;  // which domain index to use in the getedumail <select>
 let geteduDomainOptions = []; // populated on first openGetedumail call
@@ -97,6 +100,15 @@ let geteduDomainOptions = []; // populated on first openGetedumail call
 async function getTempEmail() {
   const login = 'usr' + Math.floor(Math.random() * 9999999);
   activeLogin = login;
+
+  // Custom domain override — set KEYGEN_CUSTOM_EMAIL env var to bypass all temp-mail providers
+  if (process.env.KEYGEN_CUSTOM_EMAIL) {
+    activeEmail    = process.env.KEYGEN_CUSTOM_EMAIL;
+    activeLogin    = activeEmail.split('@')[0];
+    activeProvider = 'custom';
+    console.log(`[TempMail] Custom email (env): ${activeEmail}`);
+    return activeEmail;
+  }
 
   // Guerrillamail first — reliable sid_token API (skip if already blocked by Serper)
   if (!gmBlocked) {
@@ -177,6 +189,36 @@ async function getTempEmail() {
     return activeEmail;
   }
 
+  // dropmail.me — anonymous GraphQL-based inbox, relatively obscure
+  if (!dropmailBlocked) {
+    try {
+      const r = await axiosNoVerify.post(
+        'https://dropmail.me/api/graphql/web-test-wGNPFj0p',
+        { query: 'mutation { introduceSession { id, addresses { address } } }' },
+        { timeout: 10000, headers: { 'Content-Type': 'application/json' } }
+      );
+      const addr = r.data?.data?.introduceSession?.addresses?.[0]?.address;
+      if (addr) {
+        dropmailSessionId = r.data.data.introduceSession.id;
+        activeProvider    = 'dropmail';
+        activeEmail       = addr;
+        activeLogin       = addr.split('@')[0];
+        console.log(`[TempMail] dropmail.me: ${addr}`);
+        return addr;
+      }
+    } catch {}
+  }
+
+  // maildrop.cc — username-based inbox, no signup, not widely blocklisted
+  if (!maildropBlocked) {
+    const mdLogin = 'serper' + Math.floor(Math.random() * 99999);
+    activeProvider = 'maildrop';
+    activeEmail    = `${mdLogin}@maildrop.cc`;
+    activeLogin    = mdLogin;
+    console.log(`[TempMail] maildrop.cc: ${activeEmail}`);
+    return activeEmail;
+  }
+
   // All providers exhausted
   console.log('[TempMail] ❌ ALL providers blocked — cannot get a temp email this run');
   return null;
@@ -201,6 +243,20 @@ async function checkEmails() {
       );
       return r.data?.list || [];
     }
+    if (activeProvider === 'dropmail') {
+      if (!dropmailSessionId) return [];
+      const r = await axiosNoVerify.post(
+        'https://dropmail.me/api/graphql/web-test-wGNPFj0p',
+        { query: `query { session(id: "${dropmailSessionId}") { mails { fromAddr, downloadUrl, text } } }` },
+        { timeout: 10000, headers: { 'Content-Type': 'application/json' } }
+      );
+      return r.data?.data?.session?.mails || [];
+    }
+    if (activeProvider === 'maildrop') {
+      const r = await axiosNoVerify.get(`https://maildrop.cc/v2/mailbox/${activeLogin}`, { timeout: 10000 });
+      return Array.isArray(r.data) ? r.data : [];
+    }
+    if (activeProvider === 'custom') return []; // custom: no API, browser check handles it
     const res = await axiosNoVerify.get('https://api.mail.tm/messages', {
       headers: { Authorization: `Bearer ${mailTmToken}` }, timeout: 10000,
     });
@@ -227,6 +283,19 @@ async function getEmailBody(msg) {
       );
       const raw = r.data?.mail_body || r.data?.mail_excerpt || '';
       return raw.replace(/&amp;/g, '&').replace(/&#38;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    }
+    if (activeProvider === 'dropmail') {
+      if (msg.text) return msg.text;
+      if (!msg.downloadUrl) return '';
+      const r = await axiosNoVerify.get(msg.downloadUrl, { timeout: 10000 });
+      return typeof r.data === 'string' ? r.data : JSON.stringify(r.data);
+    }
+    if (activeProvider === 'maildrop') {
+      const r = await axiosNoVerify.get(
+        `https://maildrop.cc/v2/mailbox/${activeLogin}/message/${msg.id}`,
+        { timeout: 10000 }
+      );
+      return r.data?.body || r.data?.html || JSON.stringify(r.data);
     }
     const res = await axiosNoVerify.get(`https://api.mail.tm/messages/${msg.id}`, {
       headers: { Authorization: `Bearer ${mailTmToken}` }, timeout: 10000,
@@ -516,19 +585,26 @@ async function solveRecaptchaV2(page) {
 
       // Solved check — invisible reCAPTCHA: token or bframe gone
       if (await isSolvedInvisible()) { console.log('   [reCAPTCHA] SOLVED!'); return true; }
-      console.log(`   [reCAPTCHA] Not solved on attempt ${attempt + 1} — clicking reload for fresh clip...`);
-      // After wrong answer bframe is in error state — click reload to load new audio challenge
+      console.log(`   [reCAPTCHA] Not solved on attempt ${attempt + 1} — resetting via anchor for fresh challenge...`);
+      // Reload button serves the same audio clip (cached) — same transcript → guaranteed failure.
+      // Instead: uncheck then re-check the anchor so reCAPTCHA issues a brand-new challenge instance.
       try {
-        bframe = page.frames().find(f => f.url().includes('recaptcha') && f.url().includes('bframe'));
-        if (bframe) {
-          await bframe.evaluate(() => {
-            const btn = document.querySelector('#recaptcha-reload-button');
-            if (btn) btn.click();
-          }).catch(() => {});
+        const anchorReset = page.frames().find(f => f.url().includes('recaptcha') && f.url().includes('anchor'));
+        if (anchorReset) {
+          await anchorReset.evaluate(() => document.querySelector('#recaptcha-anchor')?.click()).catch(() => {});
+          await sleep(1500);
+          await anchorReset.evaluate(() => document.querySelector('#recaptcha-anchor')?.click()).catch(() => {});
           await sleep(3500);
+        } else {
+          // Anchor gone — fall back to reload button as last resort
+          bframe = page.frames().find(f => f.url().includes('recaptcha') && f.url().includes('bframe'));
+          if (bframe) {
+            await bframe.evaluate(() => document.querySelector('#recaptcha-reload-button')?.click()).catch(() => {});
+            await sleep(3500);
+          }
         }
       } catch (_) {}
-      await sleep(2000);
+      await sleep(1000);
     } catch (e) {
       console.log(`   [reCAPTCHA] Error (attempt ${attempt + 1}): ${e.message}`);
       const is410 = e.response?.status === 410 || e.message?.includes('410');
@@ -613,6 +689,13 @@ async function checkEmailsInBrowser(browser, email, provider, sidToken, login) {
       inboxUrl = `https://www.mohmal.com/en/inbox`;
     } else if (provider === 'dispostable') {
       inboxUrl = `https://www.dispostable.com/inbox/${login}`;
+    } else if (provider === 'dropmail') {
+      inboxUrl = `https://dropmail.me/`;
+    } else if (provider === 'maildrop') {
+      inboxUrl = `https://maildrop.cc/inbox/${login}`;
+    } else if (provider === 'custom') {
+      try { await tab.close(); } catch {}
+      return null;
     } else if (provider === 'mailtm') {
       // mail.tm web inbox requires login auth — skip browser fallback, the token API is the only path
       try { await tab.close(); } catch {}
@@ -836,6 +919,9 @@ async function generateSerperKey() {
   mohmalBlocked      = false;
   dispostableBlocked = false;
   yopmailBlocked     = false;
+  dropmailBlocked    = false;
+  maildropBlocked    = false;
+  dropmailSessionId  = '';
   gmDomainIdx        = 0;
   getuduDomainIdx    = 0;
   geteduDomainOptions = [];
@@ -1078,9 +1164,8 @@ async function generateSerperKey() {
       // Extension solved detector — check every 3 ticks if reCAPTCHA token appeared.
       // If an extension (or human) solved the puzzle, a non-empty g-recaptcha-response appears.
       // We then click submit immediately to finish the signup.
-      // Wait 60s for NopeCHA / manual solve before falling back to audio bypass.
-      // (Was 300000 — that ate ~16 of the 20-minute run before audio ever fired.)
-      const extWaitDone = (Date.now() - lastSubmitTime) > 60000;
+      // Wait 5 mins (300000) for manual solve before falling back to audio bypass.
+      const extWaitDone = (Date.now() - lastSubmitTime) > 300000;
       if (url.includes('signup') && i % 3 === 0 && !extWaitDone) {
         const token = await page.evaluate(() => {
           const el = document.querySelector('[name="g-recaptcha-response"]');
@@ -1120,6 +1205,8 @@ async function generateSerperKey() {
           if (activeProvider === 'mohmal')      mohmalBlocked      = true;
           if (activeProvider === 'dispostable') dispostableBlocked = true;
           if (activeProvider === 'yopmail')     yopmailBlocked     = true;
+          if (activeProvider === 'dropmail')    dropmailBlocked    = true;
+          if (activeProvider === 'maildrop')    maildropBlocked    = true;
           console.log(`[Serper] Domain blocked (${activeEmail}) — provider=${activeProvider}`);
 
           // If using getedumail, cycle to the next dropdown domain before falling back
@@ -1174,7 +1261,7 @@ async function generateSerperKey() {
            console.log('🚨 [MANUAL ASSIST] Please solve the image puzzle in the browser! Waiting...');
         }
         
-        if (i % 3 === 0 && extWaitDone) {
+        if (url.includes('signup') && i % 3 === 0 && extWaitDone) {
           const captchaResult = await solveRecaptchaV2(page);
           if (captchaResult === 'ROTATE_IP' || captchaResult === false) {
             console.log('[Windscribe] reCAPTCHA failed/hard-blocked — rotating IP...');
@@ -1228,7 +1315,7 @@ async function generateSerperKey() {
 
           let emails = await checkEmails();
           // Browser-based fallback for guerrilla / inboxkitten if API returns nothing
-          if (!emails.length && i > 3 && activeEmail) {
+          if (!emails.length && i > 3 && activeEmail && activeProvider !== 'getedumail') {
             const verifyLink = await checkEmailsInBrowser(browser, activeEmail, activeProvider, gmSidToken, activeLogin);
             if (verifyLink) {
               console.log('[Auto-Key] Verification link found (browser) — clicking...');
