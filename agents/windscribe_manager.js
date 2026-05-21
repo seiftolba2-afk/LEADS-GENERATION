@@ -57,7 +57,7 @@ if (!_available) {
   module.exports = {
     connect: noop, rotate: noop, disconnect: noop,
     startTor: noop, renewCircuit: noop, stopTor: noop,
-    isReady: () => false,
+    isReady: () => false, isAvailable: () => false,
     getSocksProxy: () => '', getSocksArg: () => '',
     getProxyUrl: () => '', getProxyArg: () => '',
     PROXY_URL: '', SOCKS_PORT: 0,
@@ -116,18 +116,41 @@ async function connectTo(location) {
   return false;
 }
 
+// Poll Windscribe status until connected or timeout — confirms tunnel + CLI agree
+async function pollConnected(timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const s = wsRun('status', 8000).toLowerCase();
+    if (s.includes('connected')) { _ready = true; return true; }
+    await sleep(2000);
+  }
+  return false;
+}
+
 async function startTor() {
   const status = wsRun('status', 8000);
   if (status.toLowerCase().includes('connected')) {
-    _ready = true;
-    console.log('[Windscribe] Already connected — skipping startup');
-    return;
+    console.log('[Windscribe] Already connected — disconnecting to rotate to fresh IP...');
+    wsRun('disconnect', 10000);
+    await sleep(2000);
   }
   for (let i = 0; i < LOCATIONS.length; i++) {
     const loc = LOCATIONS[_locationIdx % LOCATIONS.length];
     _locationIdx++;
     const ok = await connectTo(loc);
-    if (ok) return;
+    if (ok) {
+      // Verify tunnel is stable before returning (prevents ERR_NAME_NOT_RESOLVED)
+      console.log(`[Windscribe] Verifying tunnel stability for ${loc} (up to 20s)...`);
+      const confirmed = await pollConnected(20000);
+      if (!confirmed) {
+        console.log(`[Windscribe] ⚠️  Tunnel not confirmed for ${loc} — trying next location...`);
+        wsRun('disconnect', 8000); // clean up before retrying
+        await sleep(1500);
+        continue;
+      }
+      await sleep(3000); // extra settle time for DNS propagation
+      return;
+    }
     await sleep(2000);
   }
   console.log('[Windscribe] All named locations failed — trying Best Location...');
@@ -135,6 +158,13 @@ async function startTor() {
   if (out.toLowerCase().includes('connected')) {
     _ready = true;
     console.log('[Windscribe] ✅ Connected to Best Location');
+    const confirmed = await pollConnected(30000);
+    if (!confirmed) {
+      console.log('[Windscribe] ❌ Best Location tunnel not confirmed — running without VPN');
+      _ready = false;
+    } else {
+      await sleep(3000);
+    }
   } else {
     console.log('[Windscribe] ❌ Could not connect — running without IP rotation');
   }
@@ -143,22 +173,29 @@ async function startTor() {
 async function renewCircuit() {
   const location = LOCATIONS[_locationIdx % LOCATIONS.length];
   _locationIdx++;
-  _ready = false;
   console.log(`[Windscribe] Rotating IP → "${location}"...`);
 
-  const discOut = wsRun('disconnect', 10000);
-  console.log(`[Windscribe] disconnect: ${discOut.slice(0, 80)}`);
-  await sleep(2000);
-
+  // Try connecting to new location first — only disconnect if it works
+  // This prevents leaving the browser without internet if the new connection fails
   const ok = await connectTo(location);
-  if (!ok) {
-    const fallbackOut = wsRun('connect best', 30000);
-    if (fallbackOut.toLowerCase().includes('connected')) {
-      _ready = true;
-      console.log('[Windscribe] ✅ Fallback connected to Best Location');
-    }
+  if (ok) {
+    _ready = true;
+    await sleep(3000);
+    return;
   }
-  await sleep(5000);
+
+  // New location failed — try best location without disconnecting first
+  const fallbackOut = wsRun('connect best', 30000);
+  if (fallbackOut.toLowerCase().includes('connected')) {
+    _ready = true;
+    console.log('[Windscribe] ✅ Fallback connected to Best Location');
+    await sleep(3000);
+    return;
+  }
+
+  // Everything failed — keep existing connection alive, don't disconnect
+  console.log('[Windscribe] ⚠️  Rotation failed — keeping current connection');
+  await sleep(2000);
 }
 
 const rotate = renewCircuit;
@@ -170,6 +207,7 @@ async function stopTor() {
 }
 
 function isReady()       { return _ready; }
+function isAvailable()   { return _available; }
 function getProxyUrl()   { return ''; }  // no proxy — OS routing
 function getProxyArg()   { return ''; }
 function getSocksProxy() { return ''; }
@@ -182,7 +220,9 @@ module.exports = {
   startTor,
   renewCircuit,
   stopTor,
+  pollConnected,
   isReady,
+  isAvailable,
   getProxyUrl,
   getProxyArg,
   getSocksProxy,

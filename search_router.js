@@ -85,7 +85,10 @@ async function tryDDG(query, type) {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       signal:  AbortSignal.timeout(15000),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.log(`[DDG] Non-OK response: ${res.status} ${res.statusText}`);
+      return null;
+    }
     const html      = await res.text();
     const titleRe   = /class="result__a"[^>]*>([\s\S]*?)<\/a>/g;
     const snippetRe = /class="result__snippet"[^>]*>([\s\S]*?)<\/span>/g;
@@ -96,27 +99,46 @@ async function tryDDG(query, type) {
     const organic   = titles.slice(0, 8).map((t, i) => ({ title: t, snippet: snippets[i] || '', link: links[i] || '' }));
     const places    = type === 'maps' ? mapsMapsFromOrganic(organic) : [];
     return { organic, places };
-  } catch { return null; }
+  } catch (err) {
+    console.log(`[DDG] Fetch error: ${err.message || err}`);
+    return null;
+  }
 }
 
-// ── Provider 3: ScrapingBee (maps only) ───────────────────────────────────
-
 async function tryScrapingBee(query, type, sbKey) {
-  if (!sbKey || type !== 'maps') return null;
+  if (!sbKey) return null;
   try {
-    const sbUrl = `https://app.scrapingbee.com/api/v1/google/?api_key=${sbKey}&q=${encodeURIComponent(query)}&gl=us&hl=en&nb_results=20&search_type=place`;
+    const isMaps = type === 'maps';
+    const sbUrl = `https://app.scrapingbee.com/api/v1/google/?api_key=${sbKey}&q=${encodeURIComponent(query)}&gl=us&hl=en&nb_results=20${isMaps ? '&search_type=place' : ''}`;
     const res   = await fetch(sbUrl, { signal: AbortSignal.timeout(25000) });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.log(`[ScrapingBee] Non-OK response: ${res.status} - ${errText.substring(0, 100)}`);
+      return null;
+    }
     const data   = await res.json();
-    const places = (data.local_results || data.organic_results || []).map(p => ({
-      title:       p.title || p.name || '',
-      phoneNumber: p.phone || '',
-      website:     p.website || p.url || '',
-      rating:      p.rating || '',
-      ratingCount: p.reviews || p.review_count || 0,
-    })).filter(p => p.title);
-    return { organic: [], places };
-  } catch { return null; }
+    
+    if (isMaps) {
+      const places = (data.local_results || data.organic_results || []).map(p => ({
+        title:       p.title || p.name || '',
+        phoneNumber: p.phone || '',
+        website:     p.website || p.url || '',
+        rating:      p.rating || '',
+        ratingCount: p.reviews || p.review_count || 0,
+      })).filter(p => p.title);
+      return { organic: [], places };
+    } else {
+      const organic = (data.organic_results || []).map(p => ({
+        title:   p.title || '',
+        snippet: p.description || p.snippet || '',
+        link:    p.url || p.link || '',
+      }));
+      return { organic, places: [] };
+    }
+  } catch (err) {
+    console.log(`[ScrapingBee] Fetch error: ${err.message || err}`);
+    return null;
+  }
 }
 
 // ── Main router ────────────────────────────────────────────────────────────

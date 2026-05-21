@@ -1,32 +1,26 @@
 'use strict';
 /**
  * key_generator.js — Automated Serper.dev account creator
- * Free + zero-human stack:
- *   1. puppeteer-extra + stealth plugin
- *   2. fingerprint-generator + fingerprint-injector (real browser fingerprints)
- *   3. ghost-cursor (Bezier-curve human mouse paths)
- *   4. Audio CAPTCHA bypass via wit.ai STT (free)
- *   5. Turnstile auto-click
+ * Stack:
+ *   1. Playwright (Chromium) — browser automation
+ *   2. Audio CAPTCHA bypass via wit.ai STT (free)
+ *   3. Turnstile auto-click
  */
 
-const puppeteer      = require('rebrowser-puppeteer');
-const { createCursor } = require('ghost-cursor');
-const FingerprintInjector  = require('fingerprint-injector');
-const FingerprintGenerator = require('fingerprint-generator');
+// CloakBrowser loaded dynamically (ESM) inside generateSerperKey()
+const { signupOutlookOnPage } = require('./outlook_creator');
 
 const axios = require('axios');
 const https = require('https');
 const fs    = require('fs');
 const path  = require('path');
-const ws    = require('./windscribe_manager');
 
 // Temp-email providers use certs Node.js can't verify from its bundled CAs
 const axiosNoVerify = axios.create({ httpsAgent: new https.Agent({ rejectUnauthorized: false }) });
 
-const ROOT        = 'D:\\LEADS GENERATION';
+const ROOT        = path.join(__dirname, '..');
 const LOCK_FILE   = path.join(ROOT, '.keygen.lock');
 const PROFILE_DIR = path.join(ROOT, '.serper_profile');
-const CHROME_PATH = 'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe';
 const WIT_API_KEY = 'QHOSR47F2SBIRITIV5MCK4NLYMZFFREK';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -67,258 +61,11 @@ function acquireLock() {
 }
 function releaseLock() { try { fs.unlinkSync(LOCK_FILE); } catch {} }
 
-// ── Multi-provider temp email ─────────────────────────────────────────────────
-let activeProvider = '';
-let activeEmail    = '';
-let activeLogin    = '';
-let mailTmToken    = '';
-let gmSidToken     = '';
-let geteduTab      = null;
-
-const GM_DOMAINS = [
-  'sharklasers.com', 'spam4.me', 'grr.la',
-  'guerrillamail.info', 'guerrillamail.biz', 'guerrillamail.de',
-  'guerrillamail.net', 'guerrillamailblock.com',
-];
-let gmDomainIdx   = 0;
-let gmBlocked     = false; // set true when ANY guerrillamail domain hits "not possible to register"
-let mailTmBlocked = false; // set true when mail.tm (wshu.net) hits "not possible to register"
-
-// Less-known fallback providers — not yet on Serper's blocklist
-// mailnesia has no API but exposes inbox via simple HTML (no JS needed)
-let mailnesiaBlocked  = false;
-let mohmalBlocked     = false;
-let dispostableBlocked = false;
-let yopmailBlocked    = false; // set true when yopmail also hits "not possible to register"
-let dropmailBlocked      = false;
-let maildropBlocked      = false;
-let dropmailSessionId    = '';
-let firefoxRelayBlocked  = false;
-let simpleloginBlocked   = false;
-
-let getuduDomainIdx     = 0;  // which domain index to use in the getedumail <select>
-let geteduDomainOptions = []; // populated on first openGetedumail call
-
-async function getTempEmail() {
-  const login = 'usr' + Math.floor(Math.random() * 9999999);
-  activeLogin = login;
-
-  // Custom domain override — set KEYGEN_CUSTOM_EMAIL env var to bypass all temp-mail providers
-  if (process.env.KEYGEN_CUSTOM_EMAIL) {
-    activeEmail    = process.env.KEYGEN_CUSTOM_EMAIL;
-    activeLogin    = activeEmail.split('@')[0];
-    activeProvider = 'custom';
-    console.log(`[TempMail] Custom email (env): ${activeEmail}`);
-    return activeEmail;
-  }
-
-  // Firefox Relay — generates a random @mozmail.com alias, forwards to your real inbox
-  // Free tier: 5 masks. Get token: relay.firefox.com → Settings → API token
-  // Verification lands in your real inbox → IMAP poller picks it up automatically
-  if (process.env.FIREFOX_RELAY_TOKEN && !firefoxRelayBlocked) {
-    try {
-      const r = await axiosNoVerify.post('https://relay.firefox.com/api/v1/relayaddresses/', {},
-        { headers: { Authorization: `Token ${process.env.FIREFOX_RELAY_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 10000 }
-      );
-      if (r.data?.full_address) {
-        activeEmail    = r.data.full_address;
-        activeLogin    = r.data.address;
-        activeProvider = 'custom'; // forwards to real inbox → IMAP handles it
-        console.log(`[TempMail] Firefox Relay: ${activeEmail}`);
-        return activeEmail;
-      }
-    } catch (e) { console.log(`[TempMail] Firefox Relay error: ${e.message}`); }
-  }
-
-  // SimpleLogin — generates a random alias, forwards to your real inbox
-  // Free tier: 15 aliases/month. Get key: simplelogin.io → Settings → API Keys
-  if (process.env.SIMPLELOGIN_API_KEY && !simpleloginBlocked) {
-    try {
-      const r = await axiosNoVerify.post('https://app.simplelogin.io/api/alias/random/new', {},
-        { headers: { Authentication: process.env.SIMPLELOGIN_API_KEY }, timeout: 10000 }
-      );
-      if (r.data?.email) {
-        activeEmail    = r.data.email;
-        activeLogin    = r.data.email.split('@')[0];
-        activeProvider = 'custom'; // forwards to real inbox → IMAP handles it
-        console.log(`[TempMail] SimpleLogin: ${activeEmail}`);
-        return activeEmail;
-      }
-    } catch (e) { console.log(`[TempMail] SimpleLogin error: ${e.message}`); }
-  }
-
-  // Guerrillamail first — reliable sid_token API (skip if already blocked by Serper)
-  if (!gmBlocked) {
-    const domain = GM_DOMAINS[gmDomainIdx++ % GM_DOMAINS.length];
-    try {
-      const r = await axiosNoVerify.get(
-        `https://api.guerrillamail.com/ajax.php?f=set_email_user&email_user=${login}&lang=en&site=${domain}`,
-        { timeout: 8000 }
-      );
-      gmSidToken     = r.data.sid_token || '';
-      activeProvider = 'guerrilla';
-      activeEmail    = `${login}@${domain}`;
-      console.log(`[TempMail] guerrilla (${domain}): ${activeEmail}`);
-      return activeEmail;
-    } catch {}
-  }
-
-  // mail.tm second — skip if already blocked by Serper
-  if (!mailTmBlocked) {
-    try {
-      const domainsRes = await axiosNoVerify.get('https://api.mail.tm/domains', { timeout: 10000 });
-      const domains = domainsRes.data['hydra:member'] || [];
-      if (domains.length) {
-        const tmDomain = domains[0].domain;
-        const tmPass   = 'P@ss' + Math.floor(Math.random() * 999999) + '!';
-        const tmAddr   = `${login}@${tmDomain}`;
-        await axiosNoVerify.post('https://api.mail.tm/accounts', { address: tmAddr, password: tmPass }, { timeout: 10000 });
-        const tok = await axiosNoVerify.post('https://api.mail.tm/token', { address: tmAddr, password: tmPass }, { timeout: 10000 });
-        mailTmToken    = tok.data.token;
-        activeProvider = 'mailtm';
-        activeEmail    = tmAddr;
-        console.log(`[TempMail] mail.tm: ${tmAddr}`);
-        return tmAddr;
-      }
-    } catch {}
-  }
-
-  // mailnesia.com — no JS needed, URL-based inbox, not widely blocklisted
-  if (!mailnesiaBlocked) {
-    activeProvider = 'mailnesia';
-    activeEmail    = `${login}@mailnesia.com`;
-    console.log(`[TempMail] mailnesia: ${activeEmail}`);
-    return activeEmail;
-  }
-
-  // mohmal.com — simple temp mail, not widely known
-  if (!mohmalBlocked) {
-    try {
-      const r = await axiosNoVerify.get(`https://api.mohmal.com/en/email`, { timeout: 10000 });
-      if (r.data && r.data.address) {
-        activeProvider = 'mohmal';
-        activeEmail    = r.data.address;
-        activeLogin    = r.data.address.split('@')[0];
-        console.log(`[TempMail] mohmal: ${activeEmail}`);
-        return activeEmail;
-      }
-    } catch {}
-    // Fallback: construct address manually
-    activeProvider = 'mohmal';
-    activeEmail    = `${login}@mohmal.com`;
-    console.log(`[TempMail] mohmal (manual): ${activeEmail}`);
-    return activeEmail;
-  }
-
-  // dispostable.com — another obscure provider
-  if (!dispostableBlocked) {
-    activeProvider = 'dispostable';
-    activeEmail    = `${login}@dispostable.com`;
-    console.log(`[TempMail] dispostable: ${activeEmail}`);
-    return activeEmail;
-  }
-
-  // Yopmail — last resort (likely blocked, but delivery may still work for some accounts)
-  if (!yopmailBlocked) {
-    activeProvider = 'yopmail';
-    activeEmail    = `${login}@yopmail.com`;
-    console.log(`[TempMail] yopmail (last resort): ${activeEmail}`);
-    return activeEmail;
-  }
-
-  // dropmail.me — API unreachable from most IPs; kept as stub, skipped by default
-  // maildrop.cc  — v2 API returns 404; kept as stub, skipped by default
-
-  // All providers exhausted
-  console.log('[TempMail] ❌ ALL providers blocked — cannot get a temp email this run');
-  return null;
-}
-
-async function checkEmails() {
-  try {
-    // Providers with no JSON API — signal caller to use browser-based check
-    // getedumail is included because checkGetedumail() already polls its tab — no need to
-    // double-poll via the mail.tm fall-through branch below.
-    if (['yopmail', 'mailnesia', 'mohmal', 'dispostable', 'getedumail'].includes(activeProvider)) {
-      return [];
-    }
-    if (activeProvider === 'inboxkitten') {
-      const r = await axiosNoVerify.get(`https://inboxkitten.com/api/v1/inbox/list?recipient=${activeLogin}`, { timeout: 10000 });
-      return Array.isArray(r.data) ? r.data : [];
-    }
-    if (activeProvider === 'guerrilla') {
-      const r = await axiosNoVerify.get(
-        `https://api.guerrillamail.com/ajax.php?f=get_email_list&offset=0&sid_token=${gmSidToken}`,
-        { timeout: 10000 }
-      );
-      return r.data?.list || [];
-    }
-    if (activeProvider === 'dropmail') {
-      if (!dropmailSessionId) return [];
-      const r = await axiosNoVerify.post(
-        'https://dropmail.me/api/graphql/web-test-wGNPFj0p',
-        { query: `query { session(id: "${dropmailSessionId}") { mails { fromAddr, downloadUrl, text } } }` },
-        { timeout: 10000, headers: { 'Content-Type': 'application/json' } }
-      );
-      return r.data?.data?.session?.mails || [];
-    }
-    if (activeProvider === 'maildrop') {
-      const r = await axiosNoVerify.get(`https://maildrop.cc/v2/mailbox/${activeLogin}`, { timeout: 10000 });
-      return Array.isArray(r.data) ? r.data : [];
-    }
-    if (activeProvider === 'custom') return []; // custom: no API, browser check handles it
-    const res = await axiosNoVerify.get('https://api.mail.tm/messages', {
-      headers: { Authorization: `Bearer ${mailTmToken}` }, timeout: 10000,
-    });
-    return res.data['hydra:member'] || [];
-  } catch (e) {
-    if (e.response?.status === 429) await sleep(5000);
-    return [];
-  }
-}
-
-async function getEmailBody(msg) {
-  try {
-    if (activeProvider === 'inboxkitten') {
-      const r = await axiosNoVerify.get(
-        `https://inboxkitten.com/api/v1/inbox/get?recipient=${activeLogin}&uid=${msg.uid}`,
-        { timeout: 10000 }
-      );
-      return r.data?.body || r.data?.text || JSON.stringify(r.data);
-    }
-    if (activeProvider === 'guerrilla') {
-      const r = await axiosNoVerify.get(
-        `https://api.guerrillamail.com/ajax.php?f=fetch_email&email_id=${msg.mail_id}&sid_token=${gmSidToken}`,
-        { timeout: 10000 }
-      );
-      const raw = r.data?.mail_body || r.data?.mail_excerpt || '';
-      return raw.replace(/&amp;/g, '&').replace(/&#38;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-    }
-    if (activeProvider === 'dropmail') {
-      if (msg.text) return msg.text;
-      if (!msg.downloadUrl) return '';
-      const r = await axiosNoVerify.get(msg.downloadUrl, { timeout: 10000 });
-      return typeof r.data === 'string' ? r.data : JSON.stringify(r.data);
-    }
-    if (activeProvider === 'maildrop') {
-      const r = await axiosNoVerify.get(
-        `https://maildrop.cc/v2/mailbox/${activeLogin}/message/${msg.id}`,
-        { timeout: 10000 }
-      );
-      return r.data?.body || r.data?.html || JSON.stringify(r.data);
-    }
-    const res = await axiosNoVerify.get(`https://api.mail.tm/messages/${msg.id}`, {
-      headers: { Authorization: `Bearer ${mailTmToken}` }, timeout: 10000,
-    });
-    return res.data.text || res.data.html || '';
-  } catch { return ''; }
-}
-
 // ── Ghost-cursor click (human Bezier path to element) ────────────────────────
 async function ghostClick(cursor, page, selector) {
   try {
     await page.waitForSelector(selector, { timeout: 3000 });
-    await cursor.click(selector);
+    await page.click(selector);
     return true;
   } catch { return false; }
 }
@@ -328,7 +75,7 @@ async function humanType(element, text) {
   await element.click({ clickCount: 3 }); // select all
   await jitter(100, 200);
   for (const char of text) {
-    await element.type(char, { delay: 45 + Math.random() * 85 });
+    await element.pressSequentially(char, { delay: 45 + Math.random() * 85 });
   }
 }
 
@@ -347,25 +94,48 @@ async function cursorMoveTo(cursor, page, el) {
 
 // ── Fill signup form ──────────────────────────────────────────────────────────
 async function fillForm(page, cursor, email) {
-  // Single page.evaluate() call — avoids per-element CDP round-trips timing out under NopeCHA
   const count = await page.evaluate((email) => {
-    const all = [...document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])')];
-    const visible = all.filter(el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-    if (visible.length < 2) return 0;
     const nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-    const fields = visible.length >= 4
-      ? ['Mark', 'Wilson', email, 'Solarsales123!', visible[4] ? 'Solarsales123!' : null]
-      : [email, 'Solarsales123!'];
+    function fill(el, val) {
+      if (!el) return false;
+      el.focus();
+      if (nativeSet) nativeSet.call(el, val); else el.value = val;
+      el.dispatchEvent(new Event('input',  { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keyup',   { bubbles: true }));
+      return true;
+    }
+    function vis(el) { if (!el) return false; const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; }
+    function find(selectors) {
+      for (const s of selectors) { const el = document.querySelector(s); if (el && vis(el)) return el; }
+      return null;
+    }
+
     let n = 0;
-    for (let i = 0; i < fields.length; i++) {
-      const val = fields[i]; if (!val || !visible[i]) continue;
-      visible[i].focus();
-      if (nativeSet) nativeSet.call(visible[i], val); else visible[i].value = val;
-      visible[i].dispatchEvent(new Event('input',  { bubbles: true }));
-      visible[i].dispatchEvent(new Event('change', { bubbles: true }));
-      visible[i].dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
-      visible[i].dispatchEvent(new KeyboardEvent('keyup',   { bubbles: true }));
-      n++;
+    // Email — by type first, then name/placeholder
+    const emailEl = find(['input[type="email"]','input[name*="email" i]','input[placeholder*="email" i]','input[autocomplete*="email" i]']);
+    if (fill(emailEl, email)) n++;
+
+    // Password(s)
+    for (const el of document.querySelectorAll('input[type="password"]')) {
+      if (vis(el) && fill(el, 'Solarsales123!')) n++;
+    }
+
+    // First name
+    const first = find(['input[name*="first" i]','input[placeholder*="first" i]','input[id*="first" i]','input[autocomplete="given-name"]']);
+    if (first && first !== emailEl && fill(first, 'Mark')) n++;
+
+    // Last name
+    const last = find(['input[name*="last" i]','input[placeholder*="last" i]','input[id*="last" i]','input[autocomplete="family-name"]']);
+    if (last && last !== emailEl && last !== first && fill(last, 'Wilson')) n++;
+
+    // Fallback: if nothing matched, try visible inputs by index (old behaviour)
+    if (n === 0) {
+      const visible = [...document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])')].filter(vis);
+      if (visible.length >= 2) {
+        fill(visible[0], email); fill(visible[1], 'Solarsales123!'); n = 2;
+      }
     }
     return n;
   }, email).catch(() => 0);
@@ -747,294 +517,193 @@ async function solve2captcha(page, apiKey) {
   }
 }
 
-// ── IMAP inbox poller (for custom domain email via Gmail / any IMAP server) ──
-// Env vars: KEYGEN_IMAP_HOST (default: imap.gmail.com), KEYGEN_IMAP_USER, KEYGEN_IMAP_PASS
-// For Gmail: create an App Password at myaccount.google.com/apppasswords (2FA must be on)
-// Host auto-detected from email domain — no KEYGEN_IMAP_HOST needed for common providers:
-//   Gmail / Googlemail → imap.gmail.com       (App Password required — myaccount.google.com/apppasswords)
-//   Outlook / Hotmail / Live → imap-mail.outlook.com
-//   Yahoo → imap.mail.yahoo.com               (App Password required)
-//   Zoho → imap.zoho.com
-//   cock.li / firemail.cc / cumallover.me → imap.cock.li  (free, private, unlikely blocklisted)
-//   iCloud → imap.mail.me.com                 (App-specific password required)
-const IMAP_HOST_PRESETS = {
-  'gmail.com':       'imap.gmail.com',
-  'googlemail.com':  'imap.gmail.com',
-  'outlook.com':     'imap-mail.outlook.com',
-  'hotmail.com':     'imap-mail.outlook.com',
-  'live.com':        'imap-mail.outlook.com',
-  'msn.com':         'imap-mail.outlook.com',
-  'yahoo.com':       'imap.mail.yahoo.com',
-  'yahoo.co.uk':     'imap.mail.yahoo.com',
-  'zoho.com':        'imap.zoho.com',
-  'cock.li':         'imap.cock.li',
-  'firemail.cc':     'imap.cock.li',
-  'cumallover.me':   'imap.cock.li',
-  'airmail.cc':      'imap.cock.li',
-  'icloud.com':      'imap.mail.me.com',
-  'me.com':          'imap.mail.me.com',
-};
 
-async function pollImapInbox() {
-  const user = process.env.KEYGEN_IMAP_USER;
-  const pass = process.env.KEYGEN_IMAP_PASS;
-  if (!user || !pass) return null;
-
-  const domain = user.split('@')[1] || '';
-  const host   = process.env.KEYGEN_IMAP_HOST || IMAP_HOST_PRESETS[domain] || 'imap.gmail.com';
+// ── Auto email verification ───────────────────────────────────────────────────
+// Navigates outlookTab (already logged in) to inbox, waits for Serper email,
+// extracts the verification link, and navigates to it.
+// The main monitoring loop's api-keys watcher then fires automatically.
+async function clickVerificationEmail(outlookTab, email) {
+  console.log('[Verify] Checking Outlook inbox for Serper verification email...');
   try {
-    const { ImapFlow } = require('imapflow');
-    const client = new ImapFlow({ host, port: 993, secure: true, auth: { user, pass }, logger: false });
-    await client.connect();
-    const lock = await client.getMailboxLock('INBOX');
-    let verifyLink = null;
-    try {
-      const since = new Date(Date.now() - 15 * 60 * 1000); // last 15 min
-      const uids  = await client.search({ from: 'serper', since });
-      for (const uid of uids.slice(-5)) {
-        const msg = await client.fetchOne(uid, { bodyStructure: true, source: true });
-        const body = msg.source?.toString() || '';
-        const m = body.match(/https:\/\/serper\.dev\/verify-email\?token=[^\s'"<>&\r\n]+/);
-        if (m) { verifyLink = m[0].replace(/=\r?\n/g, ''); break; } // unwrap quoted-printable
+    // Ensure we're at the correct account's inbox.
+    // The persistent profile may have a different primary account, so we scan slots 0-5
+    // to find which one has the new email (same logic as _signupOnPage in outlook_creator.js).
+    const emailPrefix = (email || '').split('@')[0].toLowerCase();
+    const currentUrl  = outlookTab.url();
+    const alreadyOnCorrectSlot = currentUrl.includes('outlook.live.com/mail') &&
+      (await outlookTab.evaluate(pfx =>
+        (document.title + document.body?.innerText || '').toLowerCase().includes(pfx),
+        emailPrefix).catch(() => false));
+
+    if (!alreadyOnCorrectSlot) {
+      let foundSlot = -1;
+      for (let slot = 0; slot < 6; slot++) {
+        try {
+          await outlookTab.goto(`https://outlook.live.com/mail/${slot}/inbox`, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          await sleep(1500);
+          const titleBody = await outlookTab.evaluate(() =>
+            (document.title + ' ' + (document.body?.innerText || '')).toLowerCase()
+          ).catch(() => '');
+          if (titleBody.includes(emailPrefix)) {
+            console.log(`[Verify] Found inbox at slot ${slot}`);
+            foundSlot = slot;
+            break;
+          }
+        } catch {}
       }
-    } finally { lock.release(); }
-    await client.logout();
-    return verifyLink;
-  } catch (e) {
-    console.log(`[IMAP] Error: ${e.message}`);
-    return null;
-  }
-}
-
-// ── Browser-based inbox check (fallback when API fails) ──────────────────────
-async function checkEmailsInBrowser(browser, email, provider, sidToken, login) {
-  let tab;
-  try {
-    tab = await browser.newPage();
-    let inboxUrl;
-    if (provider === 'guerrilla') {
-      inboxUrl = `https://www.guerrillamail.com/inbox`;
-    } else if (provider === 'yopmail') {
-      inboxUrl = `https://yopmail.com/en/mail.php?login=${login}&p=1`;
-    } else if (provider === 'mailnesia') {
-      inboxUrl = `https://mailnesia.com/mailbox/${login}`;
-    } else if (provider === 'mohmal') {
-      inboxUrl = `https://www.mohmal.com/en/inbox`;
-    } else if (provider === 'dispostable') {
-      inboxUrl = `https://www.dispostable.com/inbox/${login}`;
-    } else if (provider === 'dropmail') {
-      inboxUrl = `https://dropmail.me/`;
-    } else if (provider === 'maildrop') {
-      inboxUrl = `https://maildrop.cc/inbox/${login}`;
-    } else if (provider === 'custom') {
-      try { await tab.close(); } catch {}
-      return null;
-    } else if (provider === 'mailtm') {
-      // mail.tm web inbox requires login auth — skip browser fallback, the token API is the only path
-      try { await tab.close(); } catch {}
-      return null;
-    } else {
-      inboxUrl = `https://inboxkitten.com/ui/${login}/list`;
-    }
-
-    await tab.goto(inboxUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await sleep(3000);
-    const html = await tab.content();
-    // Look for Serper verification link directly in page HTML
-    const linkMatch = html.match(/https:\/\/serper\.dev\/verify-email\?token=[a-zA-Z0-9_=-]+/);
-    if (linkMatch) {
-      console.log('[TempMail] Verification link found in browser inbox!');
-      await tab.close().catch(() => {});
-      return linkMatch[0];
-    }
-
-    // For guerrilla: use the sid_token API to get email body
-    if (provider === 'guerrilla' && sidToken) {
-      const r = await axiosNoVerify.get(
-        `https://api.guerrillamail.com/ajax.php?f=get_email_list&offset=0&sid_token=${sidToken}`,
-        { timeout: 10000 }
-      ).catch(() => null);
-      const list = r?.data?.list || [];
-      for (const msg of list) {
-        if (!String(msg.mail_subject || '').toLowerCase().includes('serper')) continue;
-        const bodyRes = await axiosNoVerify.get(
-          `https://api.guerrillamail.com/ajax.php?f=fetch_email&email_id=${msg.mail_id}&sid_token=${sidToken}`,
-          { timeout: 10000 }
-        ).catch(() => null);
-        const body = bodyRes?.data?.mail_body || '';
-        const lm = body.match(/https:\/\/serper\.dev\/verify-email\?token=[^\s'"<]+/);
-        if (lm) { await tab.close().catch(() => {}); return lm[0]; }
+      if (foundSlot === -1) {
+        console.log('[Verify] ⚠️  Could not locate new account slot — trying /mail/0/');
+        await outlookTab.goto('https://outlook.live.com/mail/0/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await sleep(3000);
       }
     }
-  } catch (e) {
-    console.log(`[TempMail] Browser inbox check error: ${e.message}`);
-  }
-  try { await tab?.close(); } catch {}
-  return null;
-}
 
-// ── Getedumail: browser-based .edu temp email ────────────────────────────────
-async function openGetedumail(browser) {
-  try {
-    geteduTab = await browser.newPage();
-
-    // Clear getedumail session from previous runs so the creation form appears, not the cached dashboard
-    await geteduTab.goto('https://getedumail.com', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-    await geteduTab.evaluate(() => {
-      try { localStorage.clear(); sessionStorage.clear(); } catch {}
-    }).catch(() => {});
-    const geCookies = await geteduTab.cookies().catch(() => []);
-    if (geCookies.length) {
-      await Promise.all(geCookies.map(c => geteduTab.deleteCookie(c))).catch(() => {});
-    }
-    console.log('[GeteduMail] Session cleared — reloading for fresh creation form...');
-    await geteduTab.goto('https://getedumail.com', { waitUntil: 'networkidle2', timeout: 30000 });
-    await sleep(2000);
-
-    // Fill username — try name attr first, then placeholder, then first visible text input
-    const username = 'usr' + Math.floor(Math.random() * 9999999);
-    const filled = await geteduTab.evaluate((uname) => {
-      const candidates = [
-        document.querySelector('input[name="username"]'),
-        document.querySelector('input[placeholder*="sername" i]'),
-        document.querySelector('input[placeholder*="user" i]'),
-        [...document.querySelectorAll('input[type="text"]')].find(el => el.offsetParent !== null),
-      ];
-      const inp = candidates.find(Boolean);
-      if (!inp) return false;
-      inp.focus();
-      // nativeInputValueSetter triggers React/Vue state so the "Create" button enables
-      const nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-      if (nativeSet) nativeSet.call(inp, uname); else inp.value = uname;
-      inp.dispatchEvent(new Event('input',  { bubbles: true }));
-      inp.dispatchEvent(new Event('change', { bubbles: true }));
-      inp.dispatchEvent(new KeyboardEvent('keyup',   { bubbles: true }));
-      inp.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
-      return true;
-    }, username);
-    if (!filled) { console.log('[GeteduMail] Could not find username input'); await geteduTab.close().catch(() => {}); geteduTab = null; return null; }
-
-    await sleep(500);
-
-    // Enumerate domain options, then pick by getuduDomainIdx
-    const domainOpts = await geteduTab.evaluate(() => {
-      const sel = document.querySelector('select');
-      if (!sel) return [];
-      return [...sel.options].map(o => (o.value || o.text || '').trim()).filter(Boolean);
-    }).catch(() => []);
-    if (domainOpts.length) geteduDomainOptions = domainOpts;
-    const domainIdx = getuduDomainIdx % Math.max(geteduDomainOptions.length || domainOpts.length, 1);
-    await geteduTab.evaluate((idx) => {
-      const sel = document.querySelector('select');
-      if (sel && sel.options.length > idx) {
-        sel.selectedIndex = idx;
-        // Dispatch events so React/Vue state picks up the selection change
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-        sel.dispatchEvent(new Event('input',  { bubbles: true }));
-      }
-    }, domainIdx).catch(() => {});
-    if (domainOpts.length) {
-      console.log(`[GeteduMail] Domains available: ${domainOpts.join(', ')} — using index ${domainIdx} (${domainOpts[domainIdx] || '?'})`);
-    }
-
-    // Wait up to 4s for "is available" confirmation to appear (React validates async)
-    let available = false;
-    for (let w = 0; w < 8; w++) {
-      await sleep(500);
-      available = await geteduTab.evaluate(() =>
-        document.body.innerText.includes('is available')
-      ).catch(() => false);
-      if (available) break;
-    }
-    console.log(`[GeteduMail] Address available: ${available}`);
-
-    // Click via coordinates — dispatchEvent doesn't fire React onClick
-    const btnRect = await geteduTab.evaluate(() => {
-      const btn = [...document.querySelectorAll('button, input[type="submit"]')]
-        .find(b => /create|get|generate/i.test(b.textContent || b.value || ''));
-      if (!btn) return null;
-      const r = btn.getBoundingClientRect();
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-    }).catch(() => null);
-
-    if (btnRect) {
-      console.log(`[GeteduMail] Clicking button at (${Math.round(btnRect.x)}, ${Math.round(btnRect.y)})`);
-      await geteduTab.mouse.click(btnRect.x, btnRect.y);
-    } else {
-      // Fallback: form submit
-      await geteduTab.evaluate(() => { const f = document.querySelector('form'); if (f) f.submit(); });
-    }
-
-    // Wait up to 6s for the email to appear somewhere on the page
-    let email = null;
-    for (let w = 0; w < 6; w++) {
-      await sleep(1000);
-      email = await geteduTab.evaluate(() => {
-        // Strategy 1: any input with full email+edu pattern
-        for (const inp of document.querySelectorAll('input')) {
-          if (inp.value && /\.edu/i.test(inp.value) && inp.value.includes('@')) return inp.value.trim();
+    // Switch to the correct account in the sidebar (multi-account profiles)
+    // emailPrefix already declared above in slot-scan block
+    if (emailPrefix) {
+      const switched = await outlookTab.evaluate((pfx) => {
+        const allItems = [...document.querySelectorAll('[role="treeitem"], li, a, button, span')];
+        for (const item of allItems) {
+          const text = (item.textContent || item.title || item.getAttribute('aria-label') || '').toLowerCase();
+          if (text.includes(pfx)) {
+            const parent = item.closest('li, [role="group"]') || item.parentElement?.parentElement;
+            const inboxLink = parent
+              ? (parent.querySelector('[aria-label*="Inbox"], [title*="Inbox"]') ||
+                 [...parent.querySelectorAll('a,button')].find(el => el.textContent.trim() === 'Inbox'))
+              : null;
+            if (inboxLink) { inboxLink.click(); return 'inbox_clicked'; }
+            item.click();
+            return 'account_clicked';
+          }
         }
-        // Strategy 2: page text scan — matches .edu.xx and plain .edu
-        const m = document.body.innerText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.edu(?:\.[a-z]{2,})?/i);
-        return m ? m[0].trim() : null;
+        return false;
+      }, emailPrefix).catch(() => false);
+      if (switched) { console.log(`[Verify] Switched to ${email} inbox (${switched})`); await sleep(2000); }
+    }
+
+    const deadline = Date.now() + 3 * 60 * 1000; // wait up to 3 min for email to arrive
+    while (Date.now() < deadline) {
+      // Reload inbox to surface new emails
+      await outlookTab.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+      await sleep(3000);
+
+      // Re-switch after reload (Outlook web may reset view on reload)
+      if (emailPrefix) {
+        await outlookTab.evaluate((pfx) => {
+          const allItems = [...document.querySelectorAll('[role="treeitem"], li, a, button, span')];
+          for (const item of allItems) {
+            const text = (item.textContent || item.title || item.getAttribute('aria-label') || '').toLowerCase();
+            if (text.includes(pfx)) {
+              const parent = item.closest('li, [role="group"]') || item.parentElement?.parentElement;
+              const inboxLink = parent
+                ? (parent.querySelector('[aria-label*="Inbox"], [title*="Inbox"]') ||
+                   [...parent.querySelectorAll('a,button')].find(el => el.textContent.trim() === 'Inbox'))
+                : null;
+              if (inboxLink) { inboxLink.click(); return true; }
+            }
+          }
+          return false;
+        }, emailPrefix).catch(() => {});
+        await sleep(1500);
+      }
+
+      // Find the first email item — fresh account means first/only email is from Serper
+      const strategy = await outlookTab.evaluate(() => {
+        const opts = [...document.querySelectorAll('[role="option"],[data-convid]')];
+        if (!opts.length) return null;
+        // Prefer an item that mentions Serper
+        const serperItem = opts.find(el => el.textContent.toLowerCase().includes('serper'));
+        const target = serperItem || opts[0];
+        const convid = target.getAttribute('data-convid');
+        return convid ? { convid } : { click: true };
       }).catch(() => null);
-      if (email) break;
+
+      if (strategy) {
+        if (strategy.convid) {
+          await outlookTab.click(`[data-convid="${strategy.convid}"]`).catch(() => {});
+        } else {
+          const first = await outlookTab.$('[role="option"],[data-convid]').catch(() => null);
+          if (first) await first.click().catch(() => {});
+        }
+        await sleep(2500);
+
+        // Extract verification link from email body
+        const verifyUrl = await outlookTab.evaluate(() => {
+          return [...document.querySelectorAll('a[href]')]
+            .map(a => a.href)
+            .find(h => h.includes('serper.dev') &&
+              (h.includes('verify') || h.includes('confirm') || h.includes('activate') || h.includes('email')));
+        }).catch(() => null);
+
+        if (verifyUrl) {
+          console.log('[Verify] ✅ Found link — navigating to verify...');
+          await outlookTab.goto(verifyUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          return true;
+        }
+      }
+
+      console.log('[Verify] Email not found yet — retrying in 10s...');
+      await sleep(7000);
     }
 
-    if (!email) {
-      console.log('[GeteduMail] Could not extract email after form submit');
-      return null;
-    }
-
-    activeProvider = 'getedumail';
-    activeEmail    = email;
-    console.log(`[GeteduMail] Got email: ${email}`);
-    return email;
-  } catch (e) {
-    console.log(`[GeteduMail] Error: ${e.message}`);
-    try { await geteduTab?.close(); } catch {}
-    geteduTab = null;
-    return null;
+    console.log('[Verify] ⚠️  Verification email not found within 3 minutes — check manually');
+    return false;
+  } catch(e) {
+    console.log('[Verify] Error:', e.message);
+    return false;
   }
 }
 
-async function checkGetedumail() {
-  if (!geteduTab || geteduTab.isClosed()) return null;
-  try {
-    await geteduTab.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-    await sleep(1500);
+// ── CroxyProxy navigation ─────────────────────────────────────────────────────
+// Navigates to croxyproxy.com, enters the target URL, submits, and waits for load.
+// CroxyProxy proxies through their servers so Serper sees a different IP.
+async function navigateViaCroxyProxy(page, targetUrl) {
+  console.log(`[CroxyProxy] Opening proxy page for ${targetUrl}...`);
+  await page.goto('https://www.croxyproxy.com', { waitUntil: 'domcontentloaded', timeout: 20000 });
+  await jitter(1500, 2500);
 
-    // Direct link scan
-    let link = await geteduTab.evaluate(() => {
-      const a = document.querySelector('a[href*="serper.dev/verify"]');
-      if (a) return a.href;
-      const m = document.body.innerHTML.match(/https:\/\/serper\.dev\/verify-email\?token=[^\s'"<>&]+/);
-      return m ? m[0] : null;
-    });
-    if (link) return link;
-
-    // Click on inbox row mentioning serper, then re-scan
-    const clicked = await geteduTab.evaluate(() => {
-      const rows = [...document.querySelectorAll('tr, li, [class*="row"], [class*="item"], [class*="mail"], [class*="message"]')];
-      const row = rows.find(r => /serper/i.test(r.textContent || ''));
-      if (!row) return false;
-      row.click();
-      return true;
-    });
-    if (clicked) {
-      await sleep(2000);
-      link = await geteduTab.evaluate(() => {
-        const a = document.querySelector('a[href*="serper.dev/verify"]');
-        if (a) return a.href;
-        const m = document.body.innerHTML.match(/https:\/\/serper\.dev\/verify-email\?token=[^\s'"<>&]+/);
-        return m ? m[0] : null;
-      });
+  // Find the URL input — try common selectors
+  const urlInputSelector = await page.evaluate(() => {
+    const candidates = ['#url', 'input[name="url"]', 'input[type="url"]'];
+    for (const sel of candidates) {
+      if (document.querySelector(sel)) return sel;
     }
-    return link || null;
-  } catch (e) {
-    console.log(`[GeteduMail] Inbox check error: ${e.message}`);
-    return null;
+    // Fallback: first visible text input
+    const inp = [...document.querySelectorAll('input[type="text"], input:not([type])')]
+      .find(el => el.offsetParent !== null);
+    return inp?.id ? `#${inp.id}` : (inp?.name ? `input[name="${inp.name}"]` : null);
+  });
+  if (!urlInputSelector) throw new Error('[CroxyProxy] URL input not found');
+
+  // Fill via Playwright's fill (triggers real input events that React/Vue listen for)
+  await page.fill(urlInputSelector, targetUrl);
+  await jitter(500, 1000);
+
+  // Submit by pressing Enter in URL field (avoids clicking the wrong button —
+  // CroxyProxy has a "Premium" button right next to "Go!" with similar attributes)
+  await page.focus(urlInputSelector);
+  await page.press(urlInputSelector, 'Enter');
+
+  // Wait for navigation to leave the croxyproxy.com domain
+  try {
+    await page.waitForURL(u => !u.includes('croxyproxy.com/'), { timeout: 30000 });
+  } catch {
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
   }
+
+  // CroxyProxy shows a "Proxy is launching..." intermediate page (__cpi.php) before
+  // the real target loads. Wait for the title to change away from that.
+  console.log('[CroxyProxy] Waiting for proxy to finish launching...');
+  const deadline = Date.now() + 60000;
+  while (Date.now() < deadline) {
+    await sleep(1500);
+    const title = await page.title().catch(() => '');
+    const url   = page.url();
+    // Done when title no longer says "launching" AND URL is past the __cpi loading page
+    if (!/launching|croxyproxy/i.test(title) && !url.includes('__cpi.php')) break;
+  }
+  await jitter(2000, 3500);
+  console.log(`[CroxyProxy] Loaded — URL: ${page.url().slice(0, 120)}`);
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -1043,23 +712,6 @@ async function generateSerperKey() {
     console.log('[Auto-Key] Already running.');
     return null;
   }
-
-  // Reset per-run block flags so each fresh run tries all providers again.
-  // (module-level vars persist across monitor.js restarts via require() cache)
-  gmBlocked          = false;
-  mailTmBlocked      = false;
-  mailnesiaBlocked   = false;
-  mohmalBlocked      = false;
-  dispostableBlocked = false;
-  yopmailBlocked     = false;
-  dropmailBlocked     = false;
-  maildropBlocked     = false;
-  dropmailSessionId   = '';
-  firefoxRelayBlocked = false;
-  simpleloginBlocked  = false;
-  gmDomainIdx        = 0;
-  getuduDomainIdx    = 0;
-  geteduDomainOptions = [];
 
   loadStrikes(); // pull persisted dup-counter + pause state from disk
 
@@ -1070,43 +722,40 @@ async function generateSerperKey() {
     return null;
   }
 
-  // Windscribe VPN — OS-level routing, Chrome gets VPN IP without --proxy-server
-  // Only renewCircuit if we're already connected (previous run left it up) — otherwise
-  // startTor already connects to a fresh location for us.
-  let wasAlreadyConnected = false;
-  try {
-    const wsStatus = require('child_process').execSync(
-      '"C:\\Program Files\\Windscribe\\windscribe-cli.exe" status',
-      { encoding: 'utf8', timeout: 8000, windowsHide: true, stdio: 'pipe' }
-    ).toString().toLowerCase();
-    wasAlreadyConnected = wsStatus.includes('connect state: connected');
-  } catch { /* CLI hung / missing / SSL error — proceed without rotation hint */ }
-  await ws.startTor().catch(e => console.log('[Windscribe] Startup skipped:', e.message));
-  if (wasAlreadyConnected) {
-    await ws.renewCircuit().catch(() => {}); // already connected → rotate for fresh IP
-  }
-
   console.log('\n[Auto-Key] Starting...');
-  let email = await getTempEmail(); // fallback — overridden by getedumail if it succeeds
-  console.log(`[Auto-Key] Fallback email ready: ${email}`);
 
-  // Kill any stale Brave process still holding the profile lock (from a prior crashed session)
+  // Kill any stale CloakBrowser/Brave process still holding the .serper_profile lock
   const { execSync } = require('child_process');
   try {
-    const wmicOut = execSync(
-      'wmic process where "name=\'brave.exe\'" get ProcessId,CommandLine /format:csv 2>nul',
-      { encoding: 'utf8', timeout: 8000 }
-    );
-    for (const line of wmicOut.split('\n')) {
-      if (line.includes('serper_profile') && line.includes(',')) {
-        const pid = line.split(',')[1]?.trim();
-        if (pid && /^\d+$/.test(pid)) {
-          execSync(`taskkill /F /PID ${pid} 2>nul`, { timeout: 3000 });
-          console.log(`[Auto-Key] Killed stale Brave PID ${pid}`);
+    // PowerShell (Get-CimInstance) — reliable on Windows 10/11. wmic is deprecated and
+    // often returns empty results on Win11. Filter by command-line containing serper_profile.
+    const psCmd = `Get-CimInstance Win32_Process -Filter \\"Name='chrome.exe' OR Name='brave.exe'\\" | ` +
+                  `Where-Object { $_.CommandLine -like '*serper_profile*' } | ` +
+                  `ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }`;
+    const killed = execSync(`powershell.exe -NoProfile -Command "${psCmd}"`, {
+      encoding: 'utf8', timeout: 10000, windowsHide: true
+    }).trim();
+    if (killed) console.log(`[Auto-Key] Killed stale browser PIDs: ${killed.replace(/\s+/g, ', ')}`);
+  } catch (e) {
+    // Fallback to wmic for systems without PowerShell or where it failed
+    try {
+      const wmicOut = execSync(
+        'wmic process where "name=\'chrome.exe\' or name=\'brave.exe\'" get ProcessId,CommandLine /format:csv',
+        { encoding: 'utf8', timeout: 8000 }
+      );
+      for (const line of wmicOut.split('\n')) {
+        if (line.includes('serper_profile') && line.includes(',')) {
+          const pid = line.split(',')[1]?.trim();
+          if (pid && /^\d+$/.test(pid)) {
+            execSync(`taskkill /F /PID ${pid}`, { timeout: 3000 });
+            console.log(`[Auto-Key] Killed stale browser PID ${pid} (wmic fallback)`);
+          }
         }
       }
-    }
-  } catch {}
+    } catch {}
+  }
+  // Give Windows time to release file handles before launchPersistentContext touches the profile
+  await sleep(2000);
 
   // Clear stale profile locks and session restore (prevent Chrome reopening old audio challenge page)
   for (const f of ['lockfile', 'SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort']) {
@@ -1116,100 +765,75 @@ async function generateSerperKey() {
     try { fs.unlinkSync(path.join(PROFILE_DIR, 'Default', f)); } catch {}
   }
 
-  // Fingerprint injection disabled — native Chrome fingerprint is more consistent
-  // Re-enable if stealth improves: const fingerprint = generator.getFingerprint()
-  const fingerprint = null;
-
   const NOPECHA_EXT = path.join(ROOT, '.nopecha_ext');
   const hasNopecha = fs.existsSync(NOPECHA_EXT);
   if (hasNopecha) console.log('🤖 [Auto-Key] NopeCHA extension loaded — CAPTCHA will be auto-solved.');
 
-  const browser = await puppeteer.launch({
-    executablePath:   CHROME_PATH,
-    userDataDir:      PROFILE_DIR,
-    headless:         false,
-    ignoreDefaultArgs: ['--enable-automation'],
+  // Randomize fingerprint seed each run so Microsoft doesn't serve the same
+  // stale FunCAPTCHA session_id across consecutive signups.
+  const fpSeed = Math.floor(Math.random() * 90000) + 10000;
+  console.log(`[Auto-Key] Fingerprint seed: ${fpSeed}`);
+
+  const { launchPersistentContext } = await import('cloakbrowser');
+  const context = await launchPersistentContext({
+    userDataDir:  PROFILE_DIR,
+    headless:     false,
     args: [
-      '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
       '--disable-setuid-sandbox',
+      `--fingerprint=${fpSeed}`,
+      '--fingerprint-platform=windows',
       '--window-size=1280,800',
       '--start-maximized',
       '--disable-infobars',
       '--disable-notifications',
       '--disable-features=IsolateOrigins,site-per-process',
-      // Windscribe routes at OS level — no --proxy-server flag needed.
-      // (proxy-gateway not available in CLI v2.21.7; ip rotate requires Pro)
       ...(hasNopecha ? [
         `--disable-extensions-except=${NOPECHA_EXT}`,
         `--load-extension=${NOPECHA_EXT}`,
       ] : []),
     ],
-    defaultViewport: null,
-    protocolTimeout: 120000,
+    viewport: null,
+    timeout: 120000,
   });
 
-  const pages = await browser.pages();
-  const page  = pages.length > 0 ? pages[0] : await browser.newPage();
-
-  // Inject fingerprint
-  if (fingerprint) {
-    try {
-      const injector = new FingerprintInjector.FingerprintInjector();
-      await injector.attachFingerprintToPuppeteer(page, fingerprint);
-      console.log('[Fingerprint] Injected into page');
-    } catch (e) {
-      console.log(`[Fingerprint] Injection skipped: ${e.message}`);
-    }
+  // Close any restored/stale tabs from previous runs — keep only the first one
+  const initialPages = context.pages();
+  for (let i = 1; i < initialPages.length; i++) {
+    try { await initialPages[i].close(); } catch {}
   }
+  let page = initialPages[0] || await context.newPage();
 
   // Additional webdriver hiding
-  await page.evaluateOnNewDocument(() => {
+  await page.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     window.chrome = { runtime: {} };
   });
 
-  // Ghost cursor for human-like mouse paths
-  const cursor = createCursor(page);
+  const cursor = null; // ghost-cursor removed; retained in function signatures for API compat
 
   try {
-    // Warm up profile with legit sites so CF sees real cookies
-    console.log('[Auto-Key] Warming up profile (Google → HN)...');
-    await page.goto('https://www.google.com', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-    await jitter(3000, 5000);
-    await page.mouse.move(300 + Math.random() * 400, 200 + Math.random() * 300, { steps: 15 });
-    await jitter(1500, 3000);
-    await page.goto('https://news.ycombinator.com', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-    await jitter(2000, 3500);
-
-    console.log('[Auto-Key] Navigating to serper.dev/signup...');
-    await page.goto('https://serper.dev/signup', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await jitter(4000, 6000); // Let Turnstile initialize and auto-verify
-
-    // Try getedumail for a .edu address — overrides API fallback if successful (25s hard timeout)
-    // Guard against side-effect leaks: if timeout wins, the background openGetedumail may still
-    // overwrite activeProvider/activeEmail/geteduTab — we revert those changes if that happens.
-    let eduDone = false;
-    const fallbackEmail = email;
-    const eduEmail = await Promise.race([
-      openGetedumail(browser).then(e => { eduDone = true; return e; })
-                              .catch(e => { eduDone = true; console.log('[GeteduMail] Failed:', e.message); return null; }),
-      sleep(25000).then(() => null),
-    ]);
-    if (!eduDone) {
-      console.log('[GeteduMail] Timeout — using fallback email, scheduling orphan tab cleanup');
-      const orphan = geteduTab;
-      geteduTab = null;
-      // Revert provider state in case the in-flight openGetedumail later overwrites it
-      if (activeProvider === 'getedumail') {
-        activeProvider = '';
-        activeEmail    = fallbackEmail;
-      }
-      setTimeout(() => { try { orphan?.close(); } catch {} }, 30000);
-    } else if (eduEmail) {
-      email = eduEmail;
+    // Step 1: Sign up Outlook on the FIRST tab — DIRECTLY (no proxy).
+    // Microsoft doesn't IP-block us; CroxyProxy free tier gates signup.live.com.
+    console.log('[Auto-Key] Step 1: Signing up Outlook on tab #1 (direct, no proxy)...');
+    const outlookResult = await signupOutlookOnPage(page);
+    if (!outlookResult) {
+      console.log('[Auto-Key] ❌ Outlook creation failed — aborting');
+      await context.close().catch(() => {});
+      releaseLock();
+      return null;
     }
-    console.log(`[Auto-Key] Using email: ${email} (provider: ${activeProvider})`);
+    const email    = outlookResult.email;
+    const password = outlookResult.password; // needed for Microsoft OAuth step
+    const outlookTab = page; // keep reference — verification link gets clicked from here
+    console.log(`[Auto-Key] Outlook ready: ${email} — Tab #1 stays open at inbox`);
+
+    // Step 2: Open a NEW tab for Serper signup — via CroxyProxy for a fresh IP.
+    // NopeCHA extension handles any CAPTCHA that appears.
+    console.log('[Auto-Key] Step 2: Opening new tab for Serper signup via CroxyProxy...');
+    page = await context.newPage();
+    await page.bringToFront();
+    await navigateViaCroxyProxy(page, 'https://serper.dev/signup');
 
     // Natural mouse warmup — move around before interacting
     await page.mouse.move(400 + Math.random() * 200, 200 + Math.random() * 100, { steps: 12 });
@@ -1258,6 +882,8 @@ async function generateSerperKey() {
     let newKey = '';
     let screenshotTaken = false;
     let lastSubmitTime = Date.now();
+    let _verifyAttempted = false;
+    let _oauthHandled    = false;
 
     for (let i = 0; i < 240; i++) {
       if (page.isClosed()) throw new Error('Browser closed.');
@@ -1270,13 +896,10 @@ async function generateSerperKey() {
         sleep(3000).then(() => '')
       ]).catch(() => '');
       if (pageText.includes('Try again later') || pageText.includes('automated queries')) {
-        console.log('🔴 [Auto-Key] Google blocked IP (Try again later). Rotating Windscribe — will restart via monitor...');
-        await browser.close().catch(() => {});
-        geteduTab = null;
-        await ws.renewCircuit();
-        // Return null — monitor.js will restart the full function cleanly (avoids stack overflow)
-        releaseLock();
-        return null;
+        console.log('🔴 [Auto-Key] IP hard-blocked (Try again later) — reloading for fresh CroxyProxy exit IP...');
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        await sleep(4000);
+        continue;
       }
 
       if (i % 12 === 0) {
@@ -1328,64 +951,17 @@ async function generateSerperKey() {
           await sleep(2000);
         }
 
-        // Domain blocked — rotate email
+        // Domain blocked — Outlook is the only provider, nothing to rotate to
         const errText = await Promise.race([
           page.evaluate(() => document.body?.innerText || ''),
           sleep(3000).then(() => '')
         ]).catch(() => '');
         if (errText.includes('not possible to register')) {
-          if (activeProvider === 'guerrilla')   gmBlocked          = true;
-          if (activeProvider === 'mailtm')      mailTmBlocked      = true;
-          if (activeProvider === 'mailnesia')   mailnesiaBlocked   = true;
-          if (activeProvider === 'mohmal')      mohmalBlocked      = true;
-          if (activeProvider === 'dispostable') dispostableBlocked = true;
-          if (activeProvider === 'yopmail')     yopmailBlocked     = true;
-          if (activeProvider === 'dropmail')    dropmailBlocked    = true;
-          if (activeProvider === 'maildrop')    maildropBlocked    = true;
-          console.log(`[Serper] Domain blocked (${activeEmail}) — provider=${activeProvider}`);
-
-          // If using getedumail, cycle to the next dropdown domain before falling back
-          if (activeProvider === 'getedumail' && geteduDomainOptions.length > 1) {
-            getuduDomainIdx++;
-            if (getuduDomainIdx < geteduDomainOptions.length) {
-              console.log(`[GeteduMail] Trying domain ${geteduDomainOptions[getuduDomainIdx]} (${getuduDomainIdx + 1}/${geteduDomainOptions.length})...`);
-              try { await geteduTab?.close(); } catch {}
-              geteduTab = null;
-              const nextEduEmail = await Promise.race([
-                openGetedumail(browser).catch(() => null),
-                sleep(20000).then(() => null),
-              ]);
-              if (nextEduEmail) {
-                email = nextEduEmail;
-                await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-                await sleep(4000);
-                await fillForm(page, cursor, email);
-                await jitter(1000, 2000);
-                await clickButton(page, cursor, 'Create account');
-                lastSubmitTime = Date.now();
-                continue;
-              }
-            }
-            console.log('[GeteduMail] All domains blocked — falling back to API providers');
-          }
-
-          // Free the orphan getedumail tab before switching providers (was leaking memory)
-          try { await geteduTab?.close(); } catch {}
-          geteduTab = null;
-
-          // Fall through: rotate IP + try next API-based provider
-          await ws.renewCircuit();
-          await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-          await sleep(4000);
-          const newEmail = await getTempEmail().catch(() => null);
-          if (newEmail) {
-            email = newEmail; // persist for subsequent re-fill after any further reloads
-            await fillForm(page, cursor, email);
-            await jitter(1000, 2000);
-            await clickButton(page, cursor, 'Create account');
-            lastSubmitTime = Date.now();
-          }
-          continue;
+          console.log(`[Serper] "not possible to register" seen on ${url.slice(0,50)}`);
+          console.log(`[Serper] page text: ${errText.slice(0, 300).replace(/\s+/g, ' ')}`);
+          console.log(`[Serper] Email domain blocked (${email}) — hotmail.com may be on Serper blocklist`);
+          // Nothing to rotate to — abort this run
+          break;
         }
 
         // reCAPTCHA solving chain: 2captcha → audio bypass → IP rotate
@@ -1411,8 +987,7 @@ async function generateSerperKey() {
           // Step 2: wit.ai audio bypass
           const captchaResult = await solveRecaptchaV2(page);
           if (captchaResult === 'ROTATE_IP' || captchaResult === false) {
-            console.log('[Windscribe] reCAPTCHA failed/hard-blocked — rotating IP...');
-            await ws.renewCircuit();
+            console.log('[reCAPTCHA] Failed — reloading for fresh CroxyProxy exit IP...');
             await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
             await sleep(4000);
             continue;
@@ -1432,82 +1007,135 @@ async function generateSerperKey() {
         // Cloudflare Turnstile (separate widget on signup form)
         const tsResult = await handleTurnstile(page, cursor);
         if (tsResult === 'ROTATE_IP') {
-          console.log('[Windscribe] Turnstile image challenge — rotating IP...');
-          await ws.renewCircuit();
+          console.log('[Turnstile] Image challenge — reloading page...');
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
           await sleep(4000);
           continue;
         }
       }
 
-      // Success — also check on home page redirect after signup
-      const isPostSignup = url.includes('verify-email') || url.includes('api-keys') ||
-        (url === 'https://serper.dev/' || url === 'https://serper.dev');
-      if (isPostSignup) {
-        if (i % 3 === 0) {
-          // Getedumail: browser-tab inbox check (primary when provider === 'getedumail')
-          if (activeProvider === 'getedumail' && geteduTab) {
-            const verifyLink = await checkGetedumail();
-            if (verifyLink) {
-              console.log('[Auto-Key] getedumail verification link found — clicking...');
-              await page.goto(verifyLink);
-              await jitter(4000, 6000);
-              await page.goto('https://serper.dev/api-keys');
-              await page.waitForSelector('text/API Key', { timeout: 10000 }).catch(() => {});
-              const html = await page.content();
-              const km   = html.match(/[a-f0-9]{40}/);
-              if (km) { newKey = km[0]; break; }
-            }
-          }
+      // Auto-verify: when Serper shows verify-email page, go get the link from Outlook inbox
+      if (!_verifyAttempted && (url.includes('verify-email') ||
+          (pageText && pageText.toLowerCase().includes('verify your email')))) {
+        _verifyAttempted = true;
+        console.log('[Auto-Key] Serper wants email verification — auto-checking Outlook inbox...');
+        await clickVerificationEmail(outlookTab, email);
+      }
 
-          // IMAP polling — fires for custom domain email when KEYGEN_IMAP_USER is set
-          if (process.env.KEYGEN_IMAP_USER) {
-            const imapLink = await pollImapInbox();
-            if (imapLink) {
-              console.log('[IMAP] Verification link found — clicking...');
-              await page.goto(imapLink);
-              await jitter(4000, 6000);
-              await page.goto('https://serper.dev/api-keys');
-              await page.waitForSelector('text/API Key', { timeout: 10000 }).catch(() => {});
-              const html = await page.content();
-              const km   = html.match(/[a-f0-9]{40}/);
-              if (km) { newKey = km[0]; break; }
-            }
-          }
-
-          let emails = await checkEmails();
-          // Browser-based fallback for guerrilla / inboxkitten if API returns nothing
-          if (!emails.length && i > 3 && activeEmail && activeProvider !== 'getedumail') {
-            const verifyLink = await checkEmailsInBrowser(browser, activeEmail, activeProvider, gmSidToken, activeLogin);
-            if (verifyLink) {
-              console.log('[Auto-Key] Verification link found (browser) — clicking...');
-              await page.goto(verifyLink);
-              await jitter(4000, 6000);
-              await page.goto('https://serper.dev/api-keys');
-              await page.waitForSelector('text/API Key', { timeout: 10000 }).catch(() => {});
-              const html = await page.content();
-              const km   = html.match(/[a-f0-9]{40}/);
-              if (km) { newKey = km[0]; break; }
-            }
-          }
-          console.log(`   [Email] ${emails.length} emails in inbox`);
-          if (emails.length > 0) {
-            const body = await getEmailBody(emails[0]);
-            console.log('[Email] Body preview:', body.slice(0, 400));
-            const link = body.match(/https:\/\/serper\.dev\/verify-email\?token=[^\s'"<>]+/);
-            if (link) {
-              console.log('[Auto-Key] Verification link found — clicking...');
-              await page.goto(link[0]);
-              await jitter(4000, 6000);
-              await page.goto('https://serper.dev/api-keys');
-              await page.waitForSelector('text/API Key', { timeout: 10000 }).catch(() => {});
-              const html = await page.content();
-              const km   = html.match(/[a-f0-9]{40}/);
-              if (km) { newKey = km[0]; break; }
-            }
+      // Microsoft OAuth: Serper verifies hotmail.com via login.live.com OAuth flow.
+      // The OAuth page may load in the same Serper tab or a popup — scan all pages.
+      // Only handle once per run (_oauthHandled flag) to avoid re-triggering on each loop tick.
+      if (!_oauthHandled) {
+        let oauthPage = null;
+        if (url.includes('login.live.com') &&
+            (url.includes('oauth20_authorize') || url.includes('login.srf') || url.includes('repost'))) {
+          oauthPage = page;
+        } else {
+          for (const p of context.pages()) {
+            try {
+              const pu = p.url();
+              if (pu.includes('login.live.com') &&
+                  (pu.includes('oauth20_authorize') || pu.includes('login.srf') || pu.includes('repost'))) {
+                oauthPage = p;
+                break;
+              }
+            } catch {}
           }
         }
+
+        if (oauthPage) {
+          _oauthHandled = true;
+          console.log('[Auto-Key] Microsoft OAuth detected — handling (stage-loop)...');
+          await sleep(2000);
+
+          const emailPrefix = email.toLowerCase().split('@')[0];
+
+          // Stage-loop: re-detect the page state after each action. The real chain is
+          // password(wrong) → "different account" → picker → tile-click → password(right) → stay.
+          for (let step = 0; step < 8; step++) {
+            // Detect current stage
+            const stage = await oauthPage.evaluate((prefix) => {
+              const txt = (document.body?.innerText || '').toLowerCase();
+              if (txt.includes('stay signed in')) return 'stay';
+              const pwd = document.querySelector('input[type="password"], input[name="passwd"]');
+              if (pwd && pwd.offsetParent !== null) {
+                // Is the pre-filled account the one we want?
+                const right = txt.includes(prefix);
+                return right ? 'password-right' : 'password-wrong';
+              }
+              const em = document.querySelector('input[type="email"], input[name="loginfmt"]');
+              if (em && em.offsetParent !== null) return 'email';
+              // Account picker: tiles of existing accounts + "different account"
+              if (txt.includes('choose an account') || txt.includes('pick an account') ||
+                  document.querySelector('#otherTile, [data-test-id="accountTile"], .table')) return 'picker';
+              return 'unknown';
+            }, emailPrefix).catch(() => 'unknown');
+
+            const curUrl = oauthPage.url();
+            console.log(`[OAuth] step ${step}: stage=${stage} | ${curUrl.slice(0, 55)}`);
+
+            // Left login.live.com → OAuth complete
+            if (!curUrl.includes('login.live.com')) { console.log('[OAuth] Redirected off login — done'); break; }
+
+            if (stage === 'password-right') {
+              await oauthPage.locator('input[type="password"], input[name="passwd"]').first().fill(password);
+              await oauthPage.keyboard.press('Enter');
+              console.log('[OAuth] Password entered for correct account');
+              await sleep(3500);
+            } else if (stage === 'password-wrong') {
+              await oauthPage.evaluate(() => {
+                const link = [...document.querySelectorAll('a, button, [role="button"]')].find(el =>
+                  (el.textContent || el.getAttribute('aria-label') || '').toLowerCase().includes('different'));
+                if (link) link.click();
+              }).catch(() => {});
+              console.log('[OAuth] Wrong account — clicked "different account"');
+              await sleep(3000);
+            } else if (stage === 'picker') {
+              const picked = await oauthPage.evaluate((prefix) => {
+                const tiles = [...document.querySelectorAll('[role="button"], button, a, div[data-test-id], .table, .row')];
+                const match = tiles.find(el => (el.textContent || '').toLowerCase().includes(prefix));
+                if (match) { match.click(); return 'tile'; }
+                const diff = [...document.querySelectorAll('a, button, [role="button"], #otherTile')].find(el =>
+                  (el.textContent || el.getAttribute('aria-label') || '').toLowerCase().includes('different'));
+                if (diff) { diff.click(); return 'different'; }
+                return false;
+              }, emailPrefix).catch(() => false);
+              console.log(`[OAuth] Picker action: ${picked}`);
+              await sleep(3000);
+            } else if (stage === 'email') {
+              await oauthPage.locator('input[type="email"], input[name="loginfmt"]').first().fill(email);
+              await oauthPage.keyboard.press('Enter');
+              console.log(`[OAuth] Email entered: ${email}`);
+              await sleep(3000);
+            } else if (stage === 'stay') {
+              const noBtn = await oauthPage.$('#idBtn_Back, [value="No"]').catch(() => null);
+              if (noBtn) await noBtn.click(); else await oauthPage.keyboard.press('Enter');
+              console.log('[OAuth] "Stay signed in?" dismissed');
+              await sleep(2500);
+              break;
+            } else {
+              console.log('[OAuth] Unknown stage — waiting...');
+              await sleep(3000);
+            }
+          }
+
+          console.log('[OAuth] Stage-loop done — monitoring for Serper redirect...');
+        }
       }
+
+      // Watch ALL context pages for api-keys URL (fires when user clicks verification link)
+      for (const p of context.pages()) {
+        try {
+          const pu = p.url();
+          if (pu.includes('api-keys') || (pu.includes('serper') && pu.includes('dashboard'))) {
+            await sleep(2000);
+            const html = await p.content().catch(() => '');
+            const km = html.match(/[a-f0-9]{40}/);
+            if (km) { newKey = km[0]; break; }
+          }
+        } catch {}
+      }
+      if (newKey) break;
 
       await sleep(5000);
     }
@@ -1525,19 +1153,38 @@ async function generateSerperKey() {
           console.log('[Keygen] 🛑 3 consecutive failures — pausing keygen for 2 hours');
         }
         saveStrikes();
-        try { await browser.close(); } catch {}
-        geteduTab = null;
-        try { await ws.stopTor(); } catch {}
-        releaseLock();
+        try { await context.close(); } catch {}
+  
+          releaseLock();
         return null;
       }
 
       _consecutiveDups = 0;
       saveStrikes();
       console.log(`\n[Auto-Key] SUCCESS — New key: ${newKey}\n`);
-      try { await browser.close(); } catch {}
-      geteduTab = null;
-      try { await ws.stopTor(); } catch {}
+
+      // Persist {email, password, serperKey} so aggregator can rotate to it automatically
+      const CREDS_FILE = path.join(ROOT, 'serper_credentials.json');
+      try {
+        const existing = fs.existsSync(CREDS_FILE)
+          ? JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'))
+          : [];
+        existing.push({
+          email:     outlookResult.email,
+          password:  outlookResult.password,
+          serperKey: newKey,
+          createdAt: new Date().toISOString(),
+          active:    true,
+        });
+        const tmp = CREDS_FILE + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(existing, null, 2));
+        fs.renameSync(tmp, CREDS_FILE);
+        console.log(`[Auto-Key] Credentials saved → serper_credentials.json`);
+      } catch (e) {
+        console.log(`[Auto-Key] Warning: failed to save credentials: ${e.message}`);
+      }
+
+      try { await context.close(); } catch {}
       releaseLock();
       return newKey;
     }
@@ -1547,9 +1194,7 @@ async function generateSerperKey() {
     console.error(err.stack);
   }
 
-  try { await browser.close(); } catch {}
-  geteduTab = null;
-  await ws.stopTor();
+  try { await context.close(); } catch {}
   releaseLock();
   return null;
 }

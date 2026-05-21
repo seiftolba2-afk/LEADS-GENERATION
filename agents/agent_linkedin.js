@@ -1,5 +1,5 @@
-'use strict';
-// Agent LinkedIn — discovers leads from LinkedIn company pages via Serper site: search
+﻿'use strict';
+// Agent LinkedIn â€” discovers leads from LinkedIn company pages via Serper site: search
 
 const { serperPost } = require('./agent_serper');
 
@@ -17,7 +17,7 @@ async function fetchCityLinkedIn(state, city, stateAbbr, stateFull, industry) {
   for (const q of queries) {
     try {
       const res = await state.serperLimit(() => serperPost(state, 'search', {
-        q, gl: 'us', hl: 'en', num: 10,
+        q, gl: 'eg', hl: 'en', num: 10,
       }));
       if (!res || !res.ok) { await sleep(300); continue; }
       const data = await res.json();
@@ -60,3 +60,4 @@ async function fetchCityLinkedIn(state, city, stateAbbr, stateFull, industry) {
 }
 
 module.exports = { fetchCityLinkedIn };
+

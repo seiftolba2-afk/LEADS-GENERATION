@@ -1,5 +1,5 @@
-'use strict';
-// Agent Facebook — discovers leads from Facebook business pages via Serper site: search
+﻿'use strict';
+// Agent Facebook â€” discovers leads from Facebook business pages via Serper site: search
 
 const { serperPost, extractName } = require('./agent_serper');
 
@@ -20,7 +20,7 @@ async function fetchCityFacebook(state, city, stateAbbr, stateFull, industry) {
   for (const q of queries) {
     try {
       const res = await state.serperLimit(() => serperPost(state, 'search', {
-        q, gl: 'us', hl: 'en', num: 10,
+        q, gl: 'eg', hl: 'en', num: 10,
       }));
       if (!res || !res.ok) continue;
       const data = await res.json();
@@ -77,3 +77,4 @@ async function fetchCityFacebook(state, city, stateAbbr, stateFull, industry) {
 }
 
 module.exports = { fetchCityFacebook };
+

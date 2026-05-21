@@ -1,6 +1,6 @@
-# CLAUDE.md — Lead Aggregator Project
+# CLAUDE.md — Egypt Lead Generation Project
 
-> Drop into project root alongside local_aggregator.js. Every session inherits all rules below.
+> Permanent project config. Every session inherits all rules below.
 
 ---
 
@@ -27,19 +27,19 @@
 
 ## Project Overview
 
-**What this is:** A Node.js lead generation system that scrapes Google Maps (via Serper /maps) for contractors across 50+ US cities, enriches each lead with an owner name via a 12-layer waterfall, scores them, and outputs a two-sheet Excel file.
+**What this is:** A Node.js lead generation system that scrapes Instagram (via Serper) for interior design companies in Egypt, enriches each lead with owner name + phone, scores them, and outputs an Excel file for the client.
 
-**Stack:** Node.js (CommonJS) — `xlsx`, `axios`, `cheerio`, `csv-parser`
+**Stack:** Node.js (CommonJS) — `xlsx`, `axios`, `cheerio`, `puppeteer`
 
-**Three scripts, three industries:**
+**Entry point:**
 
 | Script | Targets | Output file |
 |--------|---------|-------------|
-| `local_aggregator.js` | Roofing contractors | `SAMPLE.xlsx` |
-| `solar_aggregator.js` | Solar panel installers | `SAMPLE_SOLAR.xlsx` |
-| `hvac_aggregator.js` | HVAC contractors | `SAMPLE_HVAC.xlsx` |
+| `interior_design_aggregator.js` | Interior design companies on Instagram (Egypt) | `out/Kareem Tolba.xlsx` |
 
-**Target per run:** 400 leads — 100 Hot Leads + 300 All Leads — all with confirmed owner name + phone.
+**Target per run:** 100 leads from Instagram with 5K–10K followers. All leads must have owner name + phone.
+
+**Country context:** Egypt (+20). All Serper queries use `gl: 'eg'`. Veriphone validates Egyptian numbers.
 
 ---
 
@@ -47,98 +47,111 @@
 
 | File | Role |
 |------|------|
-| `local_aggregator.js` | Roofing main script |
-| `solar_aggregator.js` | Solar main script |
-| `hvac_aggregator.js` | HVAC main script |
-| `SAMPLE.xlsx` | Roofing output — 2 sheets: Hot Leads, All Leads |
-| `SAMPLE_SOLAR.xlsx` | Solar output |
-| `SAMPLE_HVAC.xlsx` | HVAC output |
-| `leads_progress.csv` | Roofing live resume file — one row per confirmed lead |
-| `leads_solar_progress.csv` | Solar resume file |
-| `leads_hvac_progress.csv` | HVAC resume file |
-| `seen_companies.json` | Roofing cross-run dedup list |
-| `seen_companies_solar.json` | Solar cross-run dedup list |
-| `seen_companies_hvac.json` | HVAC cross-run dedup list |
+| `interior_design_aggregator.js` | Entry point — passes config to orchestrator |
+| `agents/agent_orchestrator.js` | Core engine — city loop, dedup, scoring, output |
+| `agents/agent_instagram.js` | Instagram scraper — main lead source |
+| `agents/agent_facebook.js` | Facebook enrichment layer |
+| `agents/agent_directory.js` | Directory search + Facebook follower fetch |
+| `agents/agent_scraper.js` | Website scraper — finds owner name + email |
+| `agents/agent_serper.js` | Serper API wrapper — maps + search |
+| `agents/agent_linkedin.js` | LinkedIn profile lookup |
+| `agents/agent_output.js` | Excel writer + manual review sheet |
+| `agents/key_generator.js` | Auto-generates Serper accounts via Outlook |
+| `agents/outlook_creator.js` | Creates Outlook email accounts (for keygen) |
+| `agents/windscribe_manager.js` | VPN manager for IP rotation |
+| `agents/shared_state.js` | Shared concurrency limiter + state across agents |
+| `cities.js` | Egypt cities list (Cairo, Alexandria, etc.) |
+| `db.js` | Lead progress CSV helpers |
+| `key_manager.js` | Serper key pool — reads/validates `serper_keys.json` |
+| `monitor.js` | Run health monitor |
+| `search_router.js` | Routes search queries across active Serper keys |
+| `serper_keys.json` | Live Serper API key pool (managed by keygen) |
+| `leads_ID.json` | Interior design lead database |
+| `seen_companies_id.json` | Cross-run dedup list for interior design |
+| `leads_id_progress.csv` | Resume file — one row per confirmed lead |
+| `out/Kareem Tolba.xlsx` | Main output Excel |
+| `out/InteriorDesign.xlsx` | Alternate output (manual review included) |
+| `enrich_existing_leads.js` | Enriches + cleanses the leads_ID.json database |
+| `quick_fix_db.js` | One-off DB fixes (recalculate scores etc.) |
+| `regen_excel.js` | Regenerates Excel from leads_ID.json without re-scraping |
+| `fix_singles.js` | Removes single-word (unresolved) names from DB |
+| `test_normalize.js` | Tests company name normalization (Arabic + English) |
+| `setup_keys.js` | One-time: validate hardcoded Serper keys into pool |
 | `tasks/todo.md` | Active plan with checkable items |
 | `tasks/lessons.md` | Patterns learned from corrections |
 | `tasks/review.md` | Post-run results and notes |
 
 ---
 
-## API Keys (inside CONFIG object)
+## API Keys
 
 | Key | Service | Note |
 |-----|---------|------|
-| `SERPER_API_KEY` | Serper — Google Maps + Search | Monthly free tier — use sparingly |
-| `SCRAPINGBEE_API_KEY` | Website scraper | Per-credit — early-exit when name+email found |
-| `FOURSQUARE_API_KEY` | Foursquare | Currently unused |
+| `serper_keys.json` pool | Serper — Google Maps + Search + Instagram | Auto-rotated by key_manager; replenished by keygen |
+| `VERIPHONE_KEY` (in .env) | Phone validation | Egyptian numbers (`+20`) |
+| `SCRAPINGBEE_API_KEY` (in .env) | Website scraper | Per-credit — early-exit when name+email found |
 
 **Never waste Serper credits on queries unlikely to return names. Always test on 5–10 leads before running the full city list.**
 
 ---
 
-## Architecture: The 12-Layer Name Waterfall
+## Architecture: Name Waterfall
 
-Each lead runs through layers in order, stopping the moment a name is found:
+Each lead runs through layers in order, stopping the moment a name is found.
+Egypt-specific layers are active; USA-only layers are skipped via `SKIP_LAYERS` in the config.
 
+**Active layers:**
 1. **Serper Google Search** — 4 queries fire in parallel; first name found wins
-2. **ScrapingBee website scrape** — /contact, /, /about, /our-team (also captures email)
-3. **Email prefix parse** — extracts name from non-generic email prefix (e.g. `john.smith@...`)
-4. **Phone number Google search** — searches formatted phone for owner mentions
-5. **State contractor license DB** — TX, FL, GA, NC, IL, AZ, CO, TN
-6. **BBB direct scrape** — finds Principal name
-7. **Angi profile** — via Serper site: query
-8. **Houzz profile** — via Serper site: query
-9. **Yelp business page** — direct scrape
-10. **Secretary of State registry** — LLC registered agent = owner
-11. **TripAdvisor** — owner review response signatures
-12. **Facebook business page** — About section + review responses
+2. **Website scrape** — /contact, /, /about (also captures email)
+3. **Email prefix parse** — extracts name from non-generic email prefix
+4. **Phone Google search** — searches formatted phone for owner mentions
+5. **LinkedIn** — profile lookup via Serper
+6. **Facebook** — About section + review response signatures
+7. **Instagram** — bio text name extraction
 
-**Never skip or reorder layers without measuring the impact on name hit rate first.**
+**Skipped for Egypt** (USA-only, zero yield): Manta, Porch, LicenseDB, BBB, OpenCorp, Angi, Houzz, Thumbtack, Yelp, SOS, TripAdvisor
+
+**Never skip or reorder active layers without measuring impact on name hit rate first.**
 
 ---
 
 ## Lead Scoring Logic
 
-All confirmed leads start at 10 (name=5, phone=5). Bonuses:
-- `+5` — email found
-- `+1` — Google rating ≥ 4.5
-- `+1` — review count 20–100
+Scoring is handled in `agents/agent_output.js → scoreLead()`. Base score from completeness (name, phone, email, website, city, Facebook followers). Bonuses for Instagram follower count and verified phone.
 
-Hot Leads = top 100 by score. All Leads = next 300. Zero overlap between sheets.
+**Instagram follower filter:** 5,000–10,000 followers (configured per run in `interior_design_aggregator.js`).
 
 ---
 
 ## Filter Criteria
 
-A lead passes `passesFilter()` if:
-- Phone number present (7+ digits)
-- `review_count` between 0 and 120
+A lead passes if:
+- Phone number present (Egyptian format, +20)
+- Instagram profile present (required field)
+- Company not already in `seen_companies_id.json`
 
-Do not change these thresholds without also updating the scoring logic.
+Do not change `REQUIRE_FIELDS` or follower bounds without updating the run config.
 
 ---
 
 ## Deduplication — 3 Layers
 
-All three must be respected when editing:
-
-1. **In-memory** — `dedupe()` dedupes by `company_domain` then `company_name` within a single run
-2. **seen_companies.json** — persistent cross-run list. Always normalize to lowercase. Always read → merge → write. Never overwrite blindly.
-3. **leads_progress.csv** — `loadProgress()` reads on startup; companies already in CSV skipped via `alreadyDone` Set
-
-Each industry has its own separate dedup file. Never share them across industries.
+1. **In-memory** — dedupes by `company_domain` then `company_name` within a single run
+2. **seen_companies_id.json** — persistent cross-run list. Always normalize to lowercase. Always read → merge → write. Never overwrite blindly.
+3. **leads_id_progress.csv** — `loadProgress()` reads on startup; companies already in CSV skipped
 
 ---
 
 ## Output Format
 
-Both sheets use the same `HEADERS` array:
+Output headers (in `agents/agent_output.js → HEADERS`):
 ```
 lead_id, source, first_name, last_name, full_name,
 email, phone, job_title, company_name, company_domain,
-location_city, location_state, linkedin_url,
-google_rating, review_count, lead_score, score_reason, status
+location_city, location_state, linkedin_url, instagram_url,
+facebook_followers, instagram_followers,
+google_rating, review_count, lead_score, score_reason,
+name_source, status, scraped_date
 ```
 
 Phone column must always be forced to text format (`t:'s'`, `z:'@'`). Never let xlsx convert it to a number.
@@ -147,7 +160,7 @@ Phone column must always be forced to text format (`t:'s'`, `z:'@'`). Never let 
 
 ## Concurrency & Rate Limiting
 
-- `createLimit(8)` — 8 leads processed in parallel
+- Concurrency limiter in `agents/shared_state.js`
 - `sleep(800)` between city fetches
 - `sleep(300–400)` between waterfall layer calls
 - `fetchSafe()` — 3 retry attempts, 1.5s × attempt backoff on 429
@@ -159,12 +172,13 @@ When adding a new layer: always add `sleep(300)` after it. When adding a new Ser
 ## Common Bug Patterns — Check These First
 
 - **Phone saved as number** — must set `ws[a].t='s'` and `ws[a].z='@'`
-- **seen_companies.json wiped** — always read-merge-write, never overwrite
+- **seen_companies_id.json wiped** — always read-merge-write, never overwrite
 - **Resume broken** — CSV header row must match `HEADERS` exactly
-- **ScrapingBee credits burned** — early exit `if (foundName && foundEmail) break` must stay inside the paths loop
+- **ScrapingBee credits burned** — early exit `if (foundName && foundEmail) break` must stay inside paths loop
 - **Name false positives** — check `STOPS` set before adding new patterns; social platforms already blocked
 - **EBUSY on save** — output xlsx must be closed in Excel before running
 - **Serper 429 on quota** — retries won't fix monthly exhaustion; surface it and stop
+- **Arabic name garbling** — normalize with `fast-levenshtein` dedup; strip RTL/LTR marks before saving
 
 ---
 
@@ -205,7 +219,7 @@ When adding a new layer: always add `sleep(300)` after it. When adding a new Ser
 ## Escalation Threshold
 
 Pause and confirm before:
-- Changing `findOwner()` waterfall order
+- Changing waterfall layer order or active/skipped sets
 - Touching dedup logic
 - Adding new API keys or services
 - Changing any output file paths
@@ -216,10 +230,6 @@ Pause and confirm before:
 ## Core Principles
 
 - **Don't burn credits** — test on 5–10 leads before full run
-- **Preserve resume** — `leads_progress.csv` is the safety net; never delete mid-run
+- **Preserve resume** — `leads_id_progress.csv` is the safety net; never delete mid-run
 - **Minimal impact** — only touch what's necessary; no side effects
 - **Own mistakes** — if a change drops name hit rate, say so, revert, log it in `tasks/lessons.md`
-
----
-
-*Permanent project config. Not a one-off prompt.*

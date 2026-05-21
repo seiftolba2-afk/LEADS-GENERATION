@@ -3,11 +3,9 @@
 // Calls all layer agents in sequence and returns { name, email, linkedin_url, nameLayer }
 
 const { getCached, setCached, recordAttempt, recordHit } = require('./shared_state');
-const { serperNameSearch, phoneSearch, serperEmailSearch, splitSafe, extractName } = require('./agent_serper');
+const { serperNameSearch, phoneSearch, serperEmailSearch, splitSafe, extractName, mapsReviewsSearch } = require('./agent_serper');
 const { mantaSearch, porchSearch }    = require('./agent_directory');
-const { stateLicenseSearch }          = require('./agent_license');
 const { bbbSearch, angiSearch, houzzSearch, thumbtackSearch, yelpSearch, tripAdvisorSearch, facebookSearch } = require('./agent_directory');
-const { openCorporatesSearch, sosSearch } = require('./agent_enrichment');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -70,9 +68,10 @@ async function scrapeSite(state, domain) {
     let html = await state.scraperLimit(() => fetchSafe(`https://${domain}${p}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': 'text/html,*/*;q=0.8' },
     }));
-    // Fallback to ScrapingBee for JS-heavy sites (thin response = JS-rendered)
-    if (sbKey && (!html || html.length < 500)) {
-      const sbUrl = `https://app.scrapingbee.com/api/v1/?api_key=${sbKey}&url=${encodeURIComponent(`https://${domain}${p}`)}&render_js=false&block_ads=true`;
+    // Fallback to ScrapingBee for JS-heavy sites (thin/empty response = JS-rendered or IP-blocked).
+    // render_js=true required — render_js=false returns the same empty shell as plain fetch.
+    if (sbKey && (!html || html.length < 2000)) {
+      const sbUrl = `https://app.scrapingbee.com/api/v1/?api_key=${sbKey}&url=${encodeURIComponent(`https://${domain}${p}`)}&render_js=true&block_ads=true&block_resources=false`;
       html = await state.scraperLimit(() => fetchSafe(sbUrl));
       await sleep(300);
     }
@@ -93,6 +92,7 @@ async function scrapeSite(state, domain) {
 async function findOwner(state, lead) {
   let name = null, email = null, linkedinUrl = null, nameLayer = null;
   const hr = state.hitRates;
+  const SKIP = (state.config && state.config.SKIP_LAYERS) ? state.config.SKIP_LAYERS : new Set();
 
   // Domain cache check
   const cacheKey = lead.company_domain || null;
@@ -121,10 +121,18 @@ async function findOwner(state, lead) {
     if (!name && we) { const n = emailPrefix(we); if (n) { name = n; nameLayer = 'L2b:EmailPrefix'; recordHit(hr, 'L2b:EmailPrefix'); console.log(`    ✅ [Email prefix]  ${n.fullName}`); } }
   }
 
+  // L2e — Maps reviews signature search
+  if (!name && lead.company_name && !SKIP.has('L2e:MapsReviews')) {
+    recordAttempt(hr, 'L2e:MapsReviews');
+    name = await mapsReviewsSearch(state, lead.company_name);
+    if (name) { nameLayer = 'L2e:MapsReviews'; recordHit(hr, 'L2e:MapsReviews'); console.log(`    ✅ [Maps Reviews]  ${name.fullName}`); }
+    await sleep(300);
+  }
+
   if (name && email) { if (cacheKey) setCached(state, cacheKey, { name, email, linkedin_url: linkedinUrl, nameLayer }); return { name, email, linkedin_url: linkedinUrl, nameLayer }; }
 
   // L2c — Manta
-  if (!name && lead.company_name) {
+  if (!name && lead.company_name && !SKIP.has('L2c:Manta')) {
     recordAttempt(hr, 'L2c:Manta');
     name = await mantaSearch(state, lead.company_name, lead.location_city);
     if (name) { nameLayer = 'L2c:Manta'; recordHit(hr, 'L2c:Manta'); console.log(`    ✅ [Manta]         ${name.fullName}`); }
@@ -132,7 +140,7 @@ async function findOwner(state, lead) {
   }
 
   // L2d — Porch
-  if (!name && lead.company_name) {
+  if (!name && lead.company_name && !SKIP.has('L2d:Porch')) {
     recordAttempt(hr, 'L2d:Porch');
     name = await porchSearch(state, lead.company_name, lead.location_city);
     if (name) { nameLayer = 'L2d:Porch'; recordHit(hr, 'L2d:Porch'); console.log(`    ✅ [Porch]         ${name.fullName}`); }
@@ -147,32 +155,16 @@ async function findOwner(state, lead) {
     await sleep(300);
   }
 
-  // L4 — State license DB
-  if (!name && lead.company_name) {
-    recordAttempt(hr, 'L4:LicenseDB');
-    name = await stateLicenseSearch(state, lead.company_name, lead.location_state);
-    if (name) { nameLayer = 'L4:LicenseDB'; recordHit(hr, 'L4:LicenseDB'); console.log(`    ✅ [License DB]    ${name.fullName}`); }
-    await sleep(300);
-  }
-
   // L5 — BBB
-  if (!name && lead.company_name) {
+  if (!name && lead.company_name && !SKIP.has('L5:BBB')) {
     recordAttempt(hr, 'L5:BBB');
     name = await bbbSearch(state, lead.company_name, lead.location_city);
     if (name) { nameLayer = 'L5:BBB'; recordHit(hr, 'L5:BBB'); console.log(`    ✅ [BBB]           ${name.fullName}`); }
     await sleep(300);
   }
 
-  // L6 — OpenCorporates
-  if (!name && lead.company_name) {
-    recordAttempt(hr, 'L6:OpenCorp');
-    name = await openCorporatesSearch(state, lead.company_name, lead.location_state);
-    if (name) { nameLayer = 'L6:OpenCorp'; recordHit(hr, 'L6:OpenCorp'); console.log(`    ✅ [OpenCorp]      ${name.fullName}`); }
-    await sleep(300);
-  }
-
   // L7 — Angi
-  if (!name && lead.company_name) {
+  if (!name && lead.company_name && !SKIP.has('L7:Angi')) {
     recordAttempt(hr, 'L7:Angi');
     name = await angiSearch(state, lead.company_name, lead.location_city);
     if (name) { nameLayer = 'L7:Angi'; recordHit(hr, 'L7:Angi'); console.log(`    ✅ [Angi]          ${name.fullName}`); }
@@ -180,7 +172,7 @@ async function findOwner(state, lead) {
   }
 
   // L8 — Houzz
-  if (!name && lead.company_name) {
+  if (!name && lead.company_name && !SKIP.has('L8:Houzz')) {
     recordAttempt(hr, 'L8:Houzz');
     name = await houzzSearch(state, lead.company_name, lead.location_city);
     if (name) { nameLayer = 'L8:Houzz'; recordHit(hr, 'L8:Houzz'); console.log(`    ✅ [Houzz]         ${name.fullName}`); }
@@ -188,7 +180,7 @@ async function findOwner(state, lead) {
   }
 
   // L9 — Thumbtack
-  if (!name && lead.company_name) {
+  if (!name && lead.company_name && !SKIP.has('L9:Thumbtack')) {
     recordAttempt(hr, 'L9:Thumbtack');
     name = await thumbtackSearch(state, lead.company_name, lead.location_city);
     if (name) { nameLayer = 'L9:Thumbtack'; recordHit(hr, 'L9:Thumbtack'); console.log(`    ✅ [Thumbtack]     ${name.fullName}`); }
@@ -196,23 +188,15 @@ async function findOwner(state, lead) {
   }
 
   // L10 — Yelp
-  if (!name && lead.company_name) {
+  if (!name && lead.company_name && !SKIP.has('L10:Yelp')) {
     recordAttempt(hr, 'L10:Yelp');
     name = await yelpSearch(state, lead.company_name, lead.location_city);
     if (name) { nameLayer = 'L10:Yelp'; recordHit(hr, 'L10:Yelp'); console.log(`    ✅ [Yelp]          ${name.fullName}`); }
     await sleep(300);
   }
 
-  // L11 — Secretary of State
-  if (!name && lead.company_name) {
-    recordAttempt(hr, 'L11:SOS');
-    name = await sosSearch(state, lead.company_name, lead.location_state);
-    if (name) { nameLayer = 'L11:SOS'; recordHit(hr, 'L11:SOS'); console.log(`    ✅ [SOS]           ${name.fullName}`); }
-    await sleep(300);
-  }
-
   // L12 — TripAdvisor
-  if (!name && lead.company_name) {
+  if (!name && lead.company_name && !SKIP.has('L12:TripAdvisor')) {
     recordAttempt(hr, 'L12:TripAdvisor');
     name = await tripAdvisorSearch(state, lead.company_name, lead.location_city);
     if (name) { nameLayer = 'L12:TripAdvisor'; recordHit(hr, 'L12:TripAdvisor'); console.log(`    ✅ [TripAdvisor]   ${name.fullName}`); }
@@ -220,7 +204,7 @@ async function findOwner(state, lead) {
   }
 
   // L13 — Facebook
-  if (!name && lead.company_name) {
+  if (!name && lead.company_name && !SKIP.has('L13:Facebook')) {
     recordAttempt(hr, 'L13:Facebook');
     name = await facebookSearch(state, lead.company_name, lead.location_city);
     if (name) { nameLayer = 'L13:Facebook'; recordHit(hr, 'L13:Facebook'); console.log(`    ✅ [Facebook]      ${name.fullName}`); }

@@ -10,6 +10,7 @@ const HEADERS = [
   'lead_id','source','first_name','last_name','full_name',
   'email','phone','phone_type','job_title','company_name','company_domain',
   'location_city','location_state','linkedin_url','facebook_followers',
+  'instagram_handle','instagram_followers','instagram_bio','instagram_posts',
   'google_rating','review_count','lead_score','score_reason','name_source','status','scraped_date',
   'trigger_signal','domain_age_days','review_velocity','completeness_pct',
 ];
@@ -31,7 +32,7 @@ function scoreLead(lead, nameLayer) {
   if (lead.review_count >= 50 && lead.review_count <= 100) { score += 1; reasons.push('Sweet spot'); }
 
   if (nameLayer) {
-    const hiConf = ['L4:LicenseDB','L6:OpenCorp','L2a:Website','L2b:EmailPrefix'];
+    const hiConf = ['L4:LicenseDB','L6:OpenCorp','L2a:Website','L2b:EmailPrefix','L2f:InstagramBio'];
     const loConf = ['L13:Facebook'];
     if (hiConf.includes(nameLayer))        { score += 2; reasons.push('High-conf name'); }
     else if (loConf.includes(nameLayer))   { score -= 1; }
@@ -44,16 +45,33 @@ function scoreLead(lead, nameLayer) {
 
   if (lead.linkedin_url) { score += 1; reasons.push('LinkedIn found'); }
 
-  if (lead.phone_type === 'mobile')        { score += 2; reasons.push('Mobile phone'); }
-  else if (lead.phone_type === 'landline') { score -= 1; reasons.push('Landline'); }
+  // 1. Instagram handle exists (+3)
+  if (lead.instagram_handle) {
+    score += 3;
+    reasons.push('Instagram handle found');
+  }
 
-  if (lead.trigger_signal === 'hot_trigger')          { score += 2; reasons.push('Hot trigger'); }
-  else if (lead.trigger_signal === 'new_biz')         { score += 1; reasons.push('New biz'); }
-  else if (lead.trigger_signal === 'recently_active') { score += 1; reasons.push('Active biz'); }
+  // 2. High followers (+2)
+  if (parseInt(lead.instagram_followers) >= 1000) {
+    score += 2;
+    reasons.push('High Instagram followers');
+  }
 
-  const rv = parseFloat(lead.review_velocity);
-  if (!isNaN(rv) && rv > 8)      { score += 2; reasons.push('High velocity'); }
-  else if (!isNaN(rv) && rv > 3) { score += 1; reasons.push('Growing'); }
+  // 3. Arabic owner name (+1)
+  const isArabic = /[\u0600-\u06FF]/.test(lead.full_name || '');
+  if (isArabic) {
+    score += 1;
+    reasons.push('Arabic owner name');
+  }
+
+  // 4. Egyptian mobile direct line (+3)
+  if (lead.phone_type === 'mobile') {
+    score += 3;
+    reasons.push('Egyptian mobile direct');
+  } else if (lead.phone_type === 'landline') {
+    score -= 1;
+    reasons.push('Landline');
+  }
 
   return { score, reason: reasons.join(', ') };
 }
@@ -163,15 +181,20 @@ function saveExcel(config, allLeads, hotLeads, sheetName) {
   const combined = [...hotLeads, ...allLeads];
   combined.sort((a, b) => (b.lead_score || 0) - (a.lead_score || 0));
 
-  const QM = (config.PHONE_QUOTAS || {}).mobile   ?? 200;
-  const QV = (config.PHONE_QUOTAS || {}).voip     ?? 100;
-  const QL = (config.PHONE_QUOTAS || {}).landline  ?? 100;
+  let finalLeads;
+  if (config.PHONE_QUOTAS) {
+    const QM = config.PHONE_QUOTAS.mobile   ?? 200;
+    const QV = config.PHONE_QUOTAS.voip     ?? 100;
+    const QL = config.PHONE_QUOTAS.landline  ?? 100;
 
-  const wireless = combined.filter(l => l.phone_type === 'mobile').slice(0, QM);
-  const voip     = combined.filter(l => l.phone_type === 'voip').slice(0, QV);
-  const landline = combined.filter(l => l.phone_type === 'landline').slice(0, QL);
+    const wireless = combined.filter(l => l.phone_type === 'mobile').slice(0, QM);
+    const voip     = combined.filter(l => l.phone_type === 'voip').slice(0, QV);
+    const landline = combined.filter(l => l.phone_type === 'landline').slice(0, QL);
 
-  const finalLeads = [...wireless, ...voip, ...landline];
+    finalLeads = [...wireless, ...voip, ...landline];
+  } else {
+    finalLeads = combined;
+  }
   const wb = xlsx.utils.book_new();
   
   // Split into sheets of 400
@@ -187,14 +210,35 @@ function saveExcel(config, allLeads, hotLeads, sheetName) {
   try {
     xlsx.writeFile(wb, config.OUTPUT_FILE);
     console.log(`\n🏆 ELITE QUOTA OUTPUT SAVED → ${config.OUTPUT_FILE}`);
-    console.log(`   📱 Wireless: ${wireless.length}/${QM} | 📞 VOIP: ${voip.length}/${QV} | ☎️ Landline: ${landline.length}/${QL}`);
-    const target = QM + QV + QL;
-    if (finalLeads.length < target) {
-      console.log(`   💡 Keep running to fill the remaining ${target - finalLeads.length} slots.`);
+    if (config.PHONE_QUOTAS) {
+      const QM = config.PHONE_QUOTAS.mobile   ?? 200;
+      const QV = config.PHONE_QUOTAS.voip     ?? 100;
+      const QL = config.PHONE_QUOTAS.landline  ?? 100;
+      const wirelessCount = combined.filter(l => l.phone_type === 'mobile').length;
+      const voipCount     = combined.filter(l => l.phone_type === 'voip').length;
+      const landlineCount = combined.filter(l => l.phone_type === 'landline').length;
+      console.log(`   📱 Wireless: ${wirelessCount}/${QM} | 📞 VOIP: ${voipCount}/${QV} | ☎️ Landline: ${landlineCount}/${QL}`);
+      const target = QM + QV + QL;
+      if (finalLeads.length < target) {
+        console.log(`   💡 Keep running to fill the remaining ${target - finalLeads.length} slots.`);
+      }
+    } else {
+      console.log(`   📝 Total Leads Saved: ${finalLeads.length}`);
     }
   } catch (e) {
-    if (e.code === 'EBUSY') console.error(`\n❌ Close the Excel file first, then run again.`);
-    else console.error(`\n❌ Save error: ${e.message}`);
+    if (e.code === 'EBUSY') {
+      // Excel is open — save to a timestamped backup instead of crashing
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
+      const backupPath = config.OUTPUT_FILE.replace(/\.xlsx$/, `_backup_${ts}.xlsx`);
+      try {
+        wb.xlsx.writeFile(backupPath);
+        console.warn(`\n⚠️  Excel file was locked — saved backup to: ${backupPath}`);
+      } catch (e2) {
+        console.error(`\n❌ Save error (backup also failed): ${e2.message}`);
+      }
+    } else {
+      console.error(`\n❌ Save error: ${e.message}`);
+    }
   }
 }
 

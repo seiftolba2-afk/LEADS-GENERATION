@@ -23,7 +23,12 @@ class KeyManager {
   }
 
   _save() {
-    try { fs.writeFileSync(KEYS_FILE, JSON.stringify(this._keys, null, 2)); } catch {}
+    try {
+      // Atomic write: write to temp file first, then rename. Prevents corruption if process crashes mid-write.
+      const tmpFile = KEYS_FILE + '.tmp';
+      fs.writeFileSync(tmpFile, JSON.stringify(this._keys, null, 2));
+      fs.renameSync(tmpFile, KEYS_FILE);
+    } catch {}
   }
 
   async _testKey(key) {
@@ -61,10 +66,24 @@ class KeyManager {
       // 'ok' or 'quota' — keep it (quota keys may recover after monthly reset)
       this._keys.push(entry);
       this._save();
-      if (status === 'ok')    console.log(`[KeyManager] NEW key ${key.slice(0, 8)}... → ok ✓`);
+      if (status === 'ok') {
+        console.log(`[KeyManager] NEW key ${key.slice(0, 8)}... → ok ✓`);
+        this._appendKeyTxt(key);
+      }
       if (status === 'quota') console.log(`[KeyManager] QUOTA key ${key.slice(0, 8)}... → saved (may recover)`);
     }
     return status;
+  }
+
+  _appendKeyTxt(key) {
+    try {
+      const txtFile = path.join(__dirname, 'keys.txt');
+      let existing = '';
+      try { existing = fs.readFileSync(txtFile, 'utf8'); } catch {}
+      if (!existing.split('\n').map(l => l.trim()).includes(key)) {
+        fs.appendFileSync(txtFile, key + '\n');
+      }
+    } catch {}
   }
 
   // Returns the next live key, cycling through the pool. Returns null if none.

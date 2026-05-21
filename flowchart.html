@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Serper Automation Flowchart</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f1117; color: #e2e8f0; font-family: 'Segoe UI', sans-serif; padding: 24px; }
+  h1 { text-align: center; font-size: 18px; font-weight: 600; color: #7dd3fc; margin-bottom: 20px; letter-spacing: .5px; }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  .mermaid { background: #1a1f2e; border-radius: 12px; padding: 28px; border: 1px solid #2d3748; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; justify-content: center; margin-top: 16px; font-size: 12px; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .dot { width: 12px; height: 12px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Serper Automation — Full System Flow</h1>
+
+  <div class="mermaid">
+flowchart TD
+    %% ── Entry ────────────────────────────────────────────────────────
+    START(["▶ node monitor.js"]):::entry
+
+    %% ── Monitor Loop ─────────────────────────────────────────────────
+    CHK_KEYS{"serper_keys.json\nlive keys > 0?"}:::decision
+    SLEEP_1H["⏱ Sleep 1 hour\nthen re-check"]:::action
+    CHK_STOP{"stop file\nexists?"}:::decision
+    HALT(["⛔ Exit cleanly"]):::terminal
+    CHK_FAIL{"consecutive\nfailures ≥ 5?"}:::decision
+    HALT2(["❌ Stop — check\nVPN + email config"]):::terminal
+    SPAWN["Spawn key_generator.js\nas child process"]:::action
+
+    %% ── key_generator.js: Guards ─────────────────────────────────────
+    LOCK{"Lock file\nfresh (<2 min)?"}:::decision
+    SKIP(["⏭ Already running\n— skip"]):::terminal
+    PAUSE{"Pause timer\nactive?"}:::decision
+    SKIP2(["⏸ Paused (dup cooldown)\n— skip until timer expires"]):::terminal
+
+    %% ── VPN ──────────────────────────────────────────────────────────
+    VPN["🌐 Windscribe VPN\nConnect → US Central / East / West / CA\n(round-robin rotation)"]:::vpn
+    VPN_FAIL{"Connected?"}:::decision
+    VPN_NOOP["⚠️ Continue without VPN\n(reduced success rate)"]:::warn
+
+    %% ── Browser ──────────────────────────────────────────────────────
+    BROWSER["🖥 CloakBrowser\nimport('cloakbrowser').launchPersistentContext()\n--fingerprint=randomSeed  --fingerprint-platform=windows\nProfile: .serper_profiles/  |  NopeCHA ext loaded"]:::browser
+
+    %% ── Outlook Account Creation ─────────────────────────────────────
+    OL_CREATE["📧 outlook_creator.js\nGenerate random creds (name/username/password/DOB)\n→ signup.live.com  ⚡ DIRECT — no proxy\nVPN is ON here (clean IP for Microsoft)"]:::outlook
+    OL_CAPTCHA{"FunCaptcha\nappears?"}:::decision
+    OL_SOLVE["🧩 NopeCHA extension\nauto-solves FunCaptcha"]:::captcha
+    OL_DONE["✅ Outlook account created\nSaved → outlook_accounts.json\n💡 VPN disconnected — back to residential IP"]:::success
+
+    %% ── Serper Signup ────────────────────────────────────────────────
+    SERPER_FORM["Open new tab\n→ serper.dev/signup  ⚡ DIRECT — no proxy\nResidential IP = Turnstile auto-solves\nFill form: email · password · name"]:::action
+
+    DEAD_NOTE["⚰️ navigateViaCroxyProxy()\nfunction exists but is NEVER called\n(datacenter IPs hard-block reCAPTCHA audio)"]:::terminal
+
+    %% ── CAPTCHA handling ─────────────────────────────────────────────
+    WHICH_CAP{"Which CAPTCHA?"}:::decision
+
+    RC_AUDIO["🔊 reCAPTCHA v2 Audio Bypass\n① Click anchor checkbox\n② Switch to audio challenge\n③ Download MP3\n④ Send to wit.ai STT\n⑤ Type transcript → submit"]:::captcha
+    RC_RESULT{"Result?"}:::decision
+    RC_SOLVED(["✅ Solved"]):::success
+    RC_BLOCKED["ROTATE_IP\n→ Windscribe rotate"]:::warn
+    RC_RELOAD["RELOAD\n(expired 3× — reload widget)"]:::warn
+
+    TWOCAP["🤖 2captcha fallback\n(if TWOCAPTCHA_API_KEY set)\nSubmit task → poll → inject token"]:::captcha
+    TURNSTILE["☁ Cloudflare Turnstile\nAuto-click checkbox\n→ if image challenge: ROTATE_IP"]:::captcha
+
+    ROT_IP["🔄 Windscribe.rotate()\n→ next US/CA location"]:::vpn
+
+    %% ── Email Verification ───────────────────────────────────────────
+    VERIFY["📬 clickVerificationEmail()\nSwitch to Outlook tab\nWait up to 3 min for Serper email\nClick email → extract verify link\nNavigate to link"]:::outlook
+    VERIFY_OK{"Link found\n& opened?"}:::decision
+    VERIFY_FAIL["⚠️ Verification failed\n— log & abort run"]:::warn
+
+    %% ── Key Extraction ───────────────────────────────────────────────
+    EXTRACT["🔑 Navigate to\nserper.dev/dashboard/api-key\nExtract key value"]:::action
+    VALIDATE["key_manager.js\nTest key → POST /search\n{q:'test', num:1}"]:::keystore
+
+    KEY_STATUS{"Status?"}:::decision
+    KEY_OK["✅ Save to serper_keys.json\nAppend to keys.txt\n_consecutiveDups = 0"]:::success
+    KEY_DUP["DUPLICATE\nIncrement _consecutiveDups"]:::warn
+    KEY_DEAD["dead / error\nLog & discard"]:::warn
+    KEY_QUOTA["quota\nSave (may recover\nat monthly reset)"]:::warn
+
+    DUP_CHECK{"dups ≥ 3\nin a row?"}:::decision
+    PAUSE_2H["⏸ Pause keygen\nfor 2 hours\nSave to .keygen_strikes.json"]:::warn
+
+    %% ── Post-run ─────────────────────────────────────────────────────
+    RELEASE["🔓 Release lock file\nDisconnect VPN"]:::action
+    RECHECK["key_manager.js\nAuto-recheck every 6h\n(quota keys may recover)"]:::keystore
+
+    %% ── Lead Engine consumes keys ────────────────────────────────────
+    CONSUME["🚀 interior_design_aggregator.js\nLeads engine reads serper_keys.json\nvia search_router.js\n→ cycles live keys on 429/401/403\n→ marks dead/quota as used"]:::leads
+
+    %% ── CONNECTIONS ──────────────────────────────────────────────────
+    START --> CHK_STOP
+    CHK_STOP -->|"no"| CHK_KEYS
+    CHK_STOP -->|"yes"| HALT
+    CHK_KEYS -->|"yes"| SLEEP_1H
+    SLEEP_1H --> CHK_STOP
+    CHK_KEYS -->|"no"| SPAWN
+    SPAWN --> LOCK
+    LOCK -->|"fresh"| SKIP
+    LOCK -->|"stale / none"| PAUSE
+    PAUSE -->|"yes"| SKIP2
+    PAUSE -->|"no"| VPN
+    VPN --> VPN_FAIL
+    VPN_FAIL -->|"yes"| BROWSER
+    VPN_FAIL -->|"no"| VPN_NOOP
+    VPN_NOOP --> BROWSER
+    BROWSER --> OL_CREATE
+    OL_CREATE --> OL_CAPTCHA
+    OL_CAPTCHA -->|"yes"| OL_SOLVE
+    OL_SOLVE --> OL_DONE
+    OL_CAPTCHA -->|"no"| OL_DONE
+    OL_DONE --> SERPER_FORM
+    DEAD_NOTE -.->|"dead code"| SERPER_FORM
+    SERPER_FORM --> WHICH_CAP
+    WHICH_CAP -->|"reCAPTCHA v2"| RC_AUDIO
+    WHICH_CAP -->|"Turnstile"| TURNSTILE
+    WHICH_CAP -->|"none"| VERIFY
+    RC_AUDIO --> RC_RESULT
+    RC_RESULT -->|"solved"| RC_SOLVED
+    RC_RESULT -->|"ROTATE_IP"| RC_BLOCKED
+    RC_RESULT -->|"RELOAD"| RC_RELOAD
+    RC_RESULT -->|"failed"| TWOCAP
+    RC_BLOCKED --> ROT_IP
+    ROT_IP --> RC_AUDIO
+    RC_RELOAD --> RC_AUDIO
+    TWOCAP --> VERIFY
+    RC_SOLVED --> VERIFY
+    TURNSTILE -->|"solved"| VERIFY
+    TURNSTILE -->|"image challenge"| ROT_IP
+    VERIFY --> VERIFY_OK
+    VERIFY_OK -->|"yes"| EXTRACT
+    VERIFY_OK -->|"no"| VERIFY_FAIL
+    VERIFY_FAIL --> RELEASE
+    EXTRACT --> VALIDATE
+    VALIDATE --> KEY_STATUS
+    KEY_STATUS -->|"ok"| KEY_OK
+    KEY_STATUS -->|"duplicate"| KEY_DUP
+    KEY_STATUS -->|"dead/error"| KEY_DEAD
+    KEY_STATUS -->|"quota"| KEY_QUOTA
+    KEY_DUP --> DUP_CHECK
+    DUP_CHECK -->|"yes"| PAUSE_2H
+    DUP_CHECK -->|"no"| RELEASE
+    PAUSE_2H --> RELEASE
+    KEY_OK --> RELEASE
+    KEY_DEAD --> RELEASE
+    KEY_QUOTA --> RELEASE
+    RELEASE --> CHK_FAIL
+    CHK_FAIL -->|"yes"| HALT2
+    CHK_FAIL -->|"no"| CHK_STOP
+    KEY_OK -.->|"key available"| CONSUME
+    RECHECK -.->|"recovered key"| CONSUME
+    VALIDATE -.->|"every 6h"| RECHECK
+
+    %% ── STYLES ───────────────────────────────────────────────────────
+    classDef entry     fill:#1e3a5f,stroke:#7dd3fc,color:#7dd3fc,font-weight:bold
+    classDef decision  fill:#1a2744,stroke:#60a5fa,color:#bfdbfe
+    classDef action    fill:#1e293b,stroke:#475569,color:#cbd5e1
+    classDef vpn       fill:#1a2e1a,stroke:#4ade80,color:#86efac
+    classDef browser   fill:#1f2937,stroke:#818cf8,color:#c7d2fe
+    classDef outlook   fill:#1e2d40,stroke:#38bdf8,color:#bae6fd
+    classDef captcha   fill:#2d1a3d,stroke:#c084fc,color:#e9d5ff
+    classDef keystore  fill:#1a2d2d,stroke:#34d399,color:#a7f3d0
+    classDef success   fill:#14532d,stroke:#4ade80,color:#86efac
+    classDef warn      fill:#2d1f0e,stroke:#fb923c,color:#fed7aa
+    classDef terminal  fill:#1c1c2e,stroke:#64748b,color:#94a3b8
+    classDef leads     fill:#2d1a1a,stroke:#f87171,color:#fca5a5
+  </div>
+
+  <div class="legend">
+    <div class="legend-item"><div class="dot" style="background:#7dd3fc"></div> Entry / Monitor</div>
+    <div class="legend-item"><div class="dot" style="background:#4ade80"></div> VPN / Key Store</div>
+    <div class="legend-item"><div class="dot" style="background:#818cf8"></div> Browser</div>
+    <div class="legend-item"><div class="dot" style="background:#38bdf8"></div> Outlook</div>
+    <div class="legend-item"><div class="dot" style="background:#c084fc"></div> CAPTCHA</div>
+    <div class="legend-item"><div class="dot" style="background:#fb923c"></div> Warning / Rotate / Pause</div>
+    <div class="legend-item"><div class="dot" style="background:#f87171"></div> Lead Engine</div>
+  </div>
+</div>
+
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'dark', flowchart: { curve: 'basis', padding: 20 } });
+</script>
+</body>
+</html>

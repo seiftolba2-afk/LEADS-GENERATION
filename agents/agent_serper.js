@@ -1,5 +1,5 @@
 'use strict';
-// Agent Serper — Google Maps city fetch + L1 name search (4 queries + DDG/Brave fallback)
+// Agent Serper â€” Google Maps city fetch + L1 name search (4 queries + DDG/Brave fallback)
 
 const cheerio = require('cheerio');
 const { recordAttempt, recordHit } = require('./shared_state');
@@ -12,15 +12,34 @@ function extractDomain(url) {
   catch { return ''; }
 }
 
-// ─────────────────────────────────────────────────────────────
-// SERPER POST — key cycling → router fallbacks (Brave→DDG→SB) → keygen
-// ─────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// SERPER POST â€” key cycling â†’ router fallbacks (Braveâ†’DDGâ†’SB) â†’ keygen
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function serperPost(state, endpoint, body, timeoutMs = 10000) {
   const KeyManager = require('../key_manager');
   const router     = require('../search_router');
   const keys       = state.config.SERPER_API_KEYS || [];
 
-  if (state._serperKeyIdx === undefined) state._serperKeyIdx = 0;
+  if (state._serperKeyIdx    === undefined) state._serperKeyIdx    = 0;
+  if (state._serperReqCount  === undefined) state._serperReqCount  = 0;
+
+  // Hard cap: abort run before burning the whole quota on a bug/loop
+  const cap = state.config.SERPER_REQUEST_CAP || 2000;
+  state._serperReqCount++;
+  if (state._serperReqCount > cap) {
+    console.error(`🛑 [Serper] Request cap ${cap} reached (${state._serperReqCount} calls). Stopping run to protect quota.`);
+    throw new Error('SERPER_CAP_EXCEEDED');
+  }
+
+  if (state._serperKeyIdx >= keys.length) {
+    const liveKeys = KeyManager.getAllKeys().filter(k => k.status === 'ok').map(k => k.key);
+    if (liveKeys.length > 0) {
+      state.config.SERPER_API_KEYS = liveKeys;
+      state._serperKeyIdx = 0;
+      keys.length = 0;
+      keys.push(...liveKeys);
+    }
+  }
 
   // 1. Try each configured Serper key
   for (let i = state._serperKeyIdx; i < keys.length; i++) {
@@ -37,14 +56,14 @@ async function serperPost(state, endpoint, body, timeoutMs = 10000) {
     } catch { state._serperKeyIdx = i + 1; }
   }
 
-  // 2. Fallback chain: Brave → DDG → ScrapingBee (via router)
+  // 2. Fallback chain: Brave â†’ DDG â†’ ScrapingBee (via router)
   const type     = endpoint === 'maps' ? 'maps' : 'web';
   const fallback = await router.search(body.q, type, { ...state.config, _serperKeyIdx: state._serperKeyIdx }, body.num || 10);
   if (fallback.ok) return { ok: true, source: 'serper', json: async () => fallback.data };
 
-  // 3. Auto-keygen — only if not paused and all keys exhausted
+  // 3. Auto-keygen â€” only if not paused and all keys exhausted
   if (state._serperKeyIdx >= keys.length && (!state._keygenPausedUntil || Date.now() > state._keygenPausedUntil)) {
-    console.log('🔄 [Serper] All keys exhausted — launching auto key generator...');
+    console.log('ðŸ”„ [Serper] All keys exhausted â€” launching auto key generator...');
     try {
       const { generateSerperKey } = require('./key_generator');
       const newKey = await generateSerperKey();
@@ -52,9 +71,9 @@ async function serperPost(state, endpoint, body, timeoutMs = 10000) {
         const addResult = await KeyManager.addKey(newKey);
         if (addResult === 'duplicate') {
           state._keygenDups = (state._keygenDups || 0) + 1;
-          console.log(`[Keygen] DUPLICATE KEY — signup failed silently, skipping (${state._keygenDups}/3)`);
+          console.log(`[Keygen] DUPLICATE KEY â€” signup failed silently, skipping (${state._keygenDups}/3)`);
           if (state._keygenDups >= 3) {
-            console.log('[Keygen] 🛑 3 consecutive failures — pausing keygen for 2 hours');
+            console.log('[Keygen] ðŸ›‘ 3 consecutive failures â€” pausing keygen for 2 hours');
             state._keygenPausedUntil = Date.now() + 2 * 60 * 60 * 1000;
             state._keygenDups = 0;
           }
@@ -71,9 +90,9 @@ async function serperPost(state, endpoint, body, timeoutMs = 10000) {
   return { ok: false, status: 429 };
 }
 
-// ─────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // FREE SEARCH FALLBACKS
-// ─────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function fetchSafe(url, options = {}) {
   for (let attempt = 0; attempt <= 2; attempt++) {
     try {
@@ -111,9 +130,9 @@ async function braveSearch(state, query) {
   } catch { return []; }
 }
 
-// ─────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // NAME EXTRACTION (mirrors aggregator_core)
-// ─────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const STOPS = new Set([
   'The','And','Of','For','With','Inc','Llc','Company','Construction','Brothers','Sons',
   'Contact','Us','Home','About','Services','Our','Team','Menu','Search','Review',
@@ -130,25 +149,58 @@ const STOPS = new Set([
   'California','Alabama','Mississippi','Louisiana','Oklahoma','Arkansas','Kansas',
   'Indiana','Michigan','Wisconsin','Minnesota','Iowa','Nebraska','Central','Greater',
   'Metro','Downtown','Uptown','Roofing','Solar','Hvac','Plumbing','Electrical',
-  'Landscaping','Painting',
+  'Landscaping','Painting','Egypt','Cairo','Giza','Alexandria','Hotel','Hotels',
+  'Furniture','Design','Decor','Interior','Interiors','Architecture','Architect',
+  'Architects','Studio','Studios','Showroom','Showrooms','Mall','Malls','Gallery',
+  'Galleries','Office','Offices',
 ]);
+
+function cleanOwnerName(name) {
+  if (!name) return '';
+  // Strip RTL markers and control chars
+  let clean = name.replace(/[\u200B-\u200D\uFEFF\u200E\u200F]/g, '').trim();
+  // Strip corporate/regional suffixes
+  clean = clean.replace(/,?\s+(Co|Corp|Ltd|Inc|Llc|LLC|Group|Design|Designs|Studio|Studios|Architects|Architect|Egypt|Cairo|Furniture|Decor|Deco)\.?$/gi, '').trim();
+  return clean;
+}
 
 function splitSafe(full) {
   if (!full) return null;
-  const parts = full.trim().split(/\s+/);
+  const cleanedFull = cleanOwnerName(full);
+  if (!cleanedFull || cleanedFull.length < 3) return null;
+
+  const isArabic = /[\u0600-\u06FF]/.test(cleanedFull);
+  if (isArabic) {
+    let cleanName = cleanedFull
+      .replace(/^(المهندس|المهندسة|مهندس|مهندسة|أستاذ|أستاذة|أ\/|دكتور|دكتورة|د\/|صاحب|م\/)\s+/g, '')
+      .replace(/\s+(المهندس|المهندسة|مهندس|مهندسة|أستاذ|أستاذة|أ\/|دكتور|دكتورة|د\/|صاحب|م\/)\s+/g, ' ');
+    const parts = cleanName.split(/\s+/);
+    if (parts.length < 2 || parts.length > 4) return null;
+    if (parts.some(p => p.length < 2 || /\d/.test(p))) return null;
+    return { firstName: parts[0], lastName: parts.slice(1).join(' '), fullName: cleanName };
+  }
+
+  // Latin names
+  const parts = cleanedFull.split(/\s+/);
   if (parts.length < 2 || parts.length > 3) return null;
   if (parts.some(p => STOPS.has(p) || (p === p.toUpperCase() && p.length > 2) || /\d/.test(p))) return null;
   if (parts[0].length < 2 || parts[parts.length - 1].length < 2) return null;
-  return { firstName: parts[0], lastName: parts.slice(1).join(' '), fullName: full.trim() };
+  return { firstName: parts[0], lastName: parts.slice(1).join(' '), fullName: cleanedFull };
 }
 
 function extractName(text) {
   if (!text) return null;
   const pats = [
+    // English patterns
     /(?:[Oo]wner|[Ff]ounder|[Cc][Ee][Oo]|[Pp]resident|[Pp]rincipal|[Oo]perator|[Pp]roprietor|[Cc]o-owner|[Mm]anaging [Pp]artner|[Mm]anaging [Mm]ember)[\s\-:]+(?:[Mm]r\.?\s*|[Mm]rs\.?\s*|[Mm]s\.?\s*)?([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+){1,2})/g,
     /([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+){1,2})[,\s\-|]+(?:[Oo]wner|[Ff]ounder|[Cc][Ee][Oo]|[Pp]resident|[Pp]rincipal)/g,
     /(?:[Ff]ounded|[Oo]wned|[Ss]tarted|[Oo]perated|[Ll]ed|[Ee]stablished|[Rr]un)\s+by\s+([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+){1,2})/g,
     /(?:I['']m|[Mm]y name is)\s+([A-Z][A-Za-z']+(?:\s+[A-Z][A-Za-z']+){1,2})/g,
+    
+    // Arabic patterns
+    /(?:مالك|مؤسس|صاحب|تأسيس|بإدارة|إدارة)[\s\-:]+([\u0600-\u06FF]+(?:\s+[\u0600-\u06FF]+){1,3})/g,
+    /([\u0600-\u06FF]+(?:\s+[\u0600-\u06FF]+){1,3})[,\s\-|]+(?:مالك|مؤسس|صاحب)/g,
+    /(?:المهندس|المهندسة|مهندس|مهندسة|مصمم|مصممة|الدكتور|دكتور|م\/)\s+([\u0600-\u06FF]+(?:\s+[\u0600-\u06FF]+){1,3})/g,
   ];
   for (const p of pats) {
     let m; p.lastIndex = 0;
@@ -159,17 +211,21 @@ function extractName(text) {
   return null;
 }
 
-// ─────────────────────────────────────────────────────────────
-// L1 — SERPER NAME SEARCH (4 queries, stop on first hit)
-// ─────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// L1 â€” SERPER NAME SEARCH (4 queries, stop on first hit)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function serperNameSearch(state, companyName, city) {
   const industry = state.config.INDUSTRY_NAME || '';
   const clean    = companyName.replace(/,?\s*(Inc|LLC|Co|Corp|Ltd)\.?/gi, '').trim();
   const queries  = [
     `"${clean}" "${city}" (owner OR founder OR president OR "managing member") ${industry} -jobs -hiring`,
-    `site:bbb.org "${clean}" ${city} principal`,
     `"${clean}" "${city}" ("owned by" OR "founded by" OR "run by" OR "operated by")`,
     `site:linkedin.com "${clean}" ${city} owner`,
+    `"${clean}" مالك`,
+    `"${clean}" مؤسس`,
+    `"${clean}" صاحب`,
+    `"${clean}" المهندس`,
+    `site:facebook.com "${clean}" interior design Egypt owner`
   ];
 
   function parseResult(data) {
@@ -180,7 +236,7 @@ async function serperNameSearch(state, companyName, city) {
     }
     for (const r of (data.organic || [])) {
       if (r.link && r.link.includes('linkedin.com/in/')) {
-        const n2 = splitSafe((r.title || '').split(/[-–|]/)[0].trim());
+        const n2 = splitSafe((r.title || '').split(/[-â€“|]/)[0].trim());
         if (n2) return { ...n2, linkedin_url: r.link };
       }
       const n = extractName(`${r.title || ''} ${r.snippet || ''}`); if (n) return n;
@@ -188,10 +244,10 @@ async function serperNameSearch(state, companyName, city) {
     return null;
   }
 
-  // Wave 1 — 4 Serper queries in parallel, stop on first hit
+  // Wave 1 â€” 4 Serper queries in parallel, stop on first hit
   const results = await Promise.all(queries.map(async q => {
     try {
-      const res = await state.serperLimit(() => serperPost(state, 'search', { q, gl: 'us', hl: 'en', num: 5 }));
+      const res = await state.serperLimit(() => serperPost(state, 'search', { q, gl: 'eg', hl: 'en', num: 5 }));
       if (!res || !res.ok) return null;
       const data = await res.json();
       
@@ -207,7 +263,7 @@ async function serperNameSearch(state, companyName, city) {
   const found = results.find(n => n !== null) || null;
   if (found) return found;
 
-  // Wave 3 — DDG or Brave fallback
+  // Wave 3 â€” DDG or Brave fallback
   const fallback = state.config.BRAVE_API_KEY
     ? await braveSearch(state, `"${clean}" ${city} owner ${industry}`)
     : await duckSearch(`"${clean}" ${city} owner ${industry}`);
@@ -218,14 +274,14 @@ async function serperNameSearch(state, companyName, city) {
   return null;
 }
 
-// Wave 2 — phone Google search (conditional: only if L1 missed)
+// Wave 2 â€” phone Google search (conditional: only if L1 missed)
 async function phoneSearch(state, phone) {
   if (!phone) return null;
   const digits = phone.replace(/\D/g, '');
   if (digits.length < 10) return null;
   const fmt = `(${digits.substr(0,3)}) ${digits.substr(3,3)}-${digits.substr(6,4)}`;
   try {
-    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `"${fmt}" (owner OR founder OR president OR "managing member") -jobs -"for sale" -"for rent"`, gl: 'us', hl: 'en', num: 5 }));
+    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `"${fmt}" (owner OR founder OR president OR "managing member") -jobs -"for sale" -"for rent"`, gl: 'eg', hl: 'en', num: 5 }));
     if (!res || !res.ok) return null;
     const data = await res.json();
     for (const r of (data.organic || [])) {
@@ -243,7 +299,7 @@ async function serperEmailSearch(state, companyName, city, domain) {
   ].filter(Boolean);
   for (const q of queries) {
     try {
-      const res = await state.serperLimit(() => serperPost(state, 'search', { q, gl: 'us', hl: 'en', num: 5 }));
+      const res = await state.serperLimit(() => serperPost(state, 'search', { q, gl: 'eg', hl: 'en', num: 5 }));
       if (!res || !res.ok) continue;
       const data = await res.json();
       const FAKE_DOMAINS = new Set(['godaddy.com','email.com','example.com','test.com','domain.com']);
@@ -261,9 +317,9 @@ async function serperEmailSearch(state, companyName, city, domain) {
   return null;
 }
 
-// ─────────────────────────────────────────────────────────────
-// SCRAPINGBEE MAPS FALLBACK — direct place search when Serper is dead
-// ─────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// SCRAPINGBEE MAPS FALLBACK â€” direct place search when Serper is dead
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function fetchCityViaSB(state, city, stateAbbr, stateFull, seenTitles) {
   const sbKey       = state.config.SCRAPINGBEE_API_KEY;
   const baseQueries = state.config.QUERIES || ['contractor'];
@@ -304,9 +360,9 @@ async function fetchCityViaSB(state, city, stateAbbr, stateFull, seenTitles) {
   return results;
 }
 
-// ─────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // GOOGLE MAPS CITY FETCH
-// ─────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function fetchCity(state, city, stateAbbr, stateFull) {
   const baseQueries = state.config.QUERIES || ['contractor'];
   const queries     = baseQueries.map(q => `${q} ${city} ${stateAbbr}`);
@@ -315,7 +371,7 @@ async function fetchCity(state, city, stateAbbr, stateFull) {
 
   for (const q of queries) {
     try {
-      const res = await state.serperLimit(() => serperPost(state, 'maps', { q, gl: 'us', hl: 'en', num: 20 }, 15000));
+      const res = await state.serperLimit(() => serperPost(state, 'maps', { q, gl: 'eg', hl: 'en', num: 20 }, 15000));
       if (!res || !res.ok) { await sleep(400); continue; }
       const data   = await res.json();
       const places = data.places || [];
@@ -340,11 +396,11 @@ async function fetchCity(state, city, stateAbbr, stateFull) {
           _website:       p.website || '',
         });
       }
-    } catch (e) { console.log(`  ⚠️  ${city}: ${e.message}`); }
+    } catch (e) { console.log(`  âš ï¸  ${city}: ${e.message}`); }
     await sleep(400);
   }
 
-  // ScrapingBee Maps fallback — fires when Serper returned 0 results for this city
+  // ScrapingBee Maps fallback â€” fires when Serper returned 0 results for this city
   if (all.length === 0 && state.config.SCRAPINGBEE_API_KEY) {
     const sbResults = await fetchCityViaSB(state, city, stateAbbr, stateFull, seenTitles);
     all.push(...sbResults);
@@ -354,4 +410,20 @@ async function fetchCity(state, city, stateAbbr, stateFull) {
   return all;
 }
 
-module.exports = { fetchCity, serperNameSearch, phoneSearch, serperEmailSearch, serperPost, splitSafe, extractName };
+async function mapsReviewsSearch(state, companyName) {
+  const clean = companyName.replace(/,?\s*(Inc|LLC|Co|Corp|Ltd)\.?/gi, '').trim();
+  const q = `"${clean}" site:google.com/maps reviews`;
+  try {
+    const res = await state.serperLimit(() => serperPost(state, 'search', { q, gl: 'eg', hl: 'en', num: 5 }));
+    if (!res || !res.ok) return null;
+    const data = await res.json();
+    for (const r of (data.organic || [])) {
+      const n = extractName(`${r.title || ''} ${r.snippet || ''}`);
+      if (n) return n;
+    }
+  } catch {}
+  return null;
+}
+
+module.exports = { fetchCity, serperNameSearch, phoneSearch, serperEmailSearch, serperPost, splitSafe, extractName, cleanOwnerName, mapsReviewsSearch };
+

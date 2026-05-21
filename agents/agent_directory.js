@@ -1,5 +1,5 @@
 'use strict';
-// Agent Directory — BBB, Manta, Porch, Angi, Houzz, Thumbtack, Yelp, TripAdvisor, Facebook
+// Agent Directory â€” BBB, Manta, Porch, Angi, Houzz, Thumbtack, Yelp, TripAdvisor, Facebook
 
 const { serperPost, extractName, splitSafe } = require('./agent_serper');
 
@@ -28,7 +28,7 @@ async function duckSearch(query) {
 
 async function mantaSearch(state, companyName, city) {
   try {
-    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:manta.com "${companyName}" ${city}`, gl: 'us', hl: 'en', num: 3 }));
+    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:manta.com "${companyName}" ${city}`, gl: 'eg', hl: 'en', num: 3 }));
     if (!res || !res.ok) return null;
     const data = await res.json();
     for (const r of (data.organic || [])) {
@@ -46,7 +46,7 @@ async function mantaSearch(state, companyName, city) {
 
 async function porchSearch(state, companyName, city) {
   try {
-    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:porch.com "${companyName}" ${city}`, gl: 'us', hl: 'en', num: 3 }));
+    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:porch.com "${companyName}" ${city}`, gl: 'eg', hl: 'en', num: 3 }));
     if (!res || !res.ok) return null;
     const data = await res.json();
     for (const r of (data.organic || [])) {
@@ -75,7 +75,7 @@ async function bbbSearch(state, companyName, city) {
 
 async function angiSearch(state, companyName, city) {
   try {
-    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:angi.com "${companyName}" ${city} owner`, gl: 'us', hl: 'en', num: 3 }));
+    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:angi.com "${companyName}" ${city} owner`, gl: 'eg', hl: 'en', num: 3 }));
     if (!res || !res.ok) return null;
     const data = await res.json();
     for (const r of (data.organic || [])) {
@@ -87,7 +87,7 @@ async function angiSearch(state, companyName, city) {
 
 async function houzzSearch(state, companyName, city) {
   try {
-    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:houzz.com "${companyName}" ${city} owner`, gl: 'us', hl: 'en', num: 3 }));
+    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:houzz.com "${companyName}" ${city} owner`, gl: 'eg', hl: 'en', num: 3 }));
     if (!res || !res.ok) return null;
     const data = await res.json();
     for (const r of (data.organic || [])) {
@@ -99,7 +99,7 @@ async function houzzSearch(state, companyName, city) {
 
 async function thumbtackSearch(state, companyName, city) {
   try {
-    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:thumbtack.com "${companyName}" ${city} owner`, gl: 'us', hl: 'en', num: 3 }));
+    const res = await state.serperLimit(() => serperPost(state, 'search', { q: `site:thumbtack.com "${companyName}" ${city} owner`, gl: 'eg', hl: 'en', num: 3 }));
     if (!res || !res.ok) return null;
     const data = await res.json();
     for (const r of (data.organic || [])) {
@@ -129,7 +129,8 @@ async function tripAdvisorSearch(state, companyName, city) {
 
 async function facebookSearch(state, companyName, city) {
   try {
-    const results = await duckSearch(`"${companyName}" "${city}" (owner OR founder OR "managing member") site:facebook.com`);
+    const clean = companyName.replace(/,?\s*(Inc|LLC|Co|Corp|Ltd)\.?/gi, '').trim();
+    const results = await duckSearch(`"${clean}" "${city}" (owner OR founder OR "founded by" OR "مؤسس" OR "بإدارة" OR "صاحب" OR "المهندس") site:facebook.com`);
     for (const r of results) { const n = extractName(`${r.title} ${r.snippet}`); if (n) return n; }
   } catch { }
   return null;
@@ -139,7 +140,7 @@ async function getFbFollowers(state, companyName, city) {
   const clean = companyName.replace(/,?\s*(Inc|LLC|Co|Corp|Ltd)\.?/gi, '').trim();
   try {
     const res = await state.serperLimit(() => serperPost(state, 'search', {
-      q: `site:facebook.com "${clean}" "${city}" followers`, gl: 'us', hl: 'en', num: 3,
+      q: `site:facebook.com "${clean}" "${city}" followers`, gl: 'eg', hl: 'en', num: 3,
     }));
     if (!res || !res.ok) return null;
     const data = await res.json();
@@ -159,3 +160,4 @@ module.exports = {
   yelpSearch, tripAdvisorSearch, facebookSearch,
   getFbFollowers,
 };
+
