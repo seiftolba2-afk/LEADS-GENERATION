@@ -63,7 +63,7 @@ async function getLinkedInUrl(state, companyName, city) {
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // PHONE TYPE VERIFICATION â€” Veriphone API (1,000 free/month)
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-const VERIPHONE_KEY = '3E269BE15CF84916977BF13D4534FE36';
+const VERIPHONE_KEY = process.env.VERIPHONE_KEY || '';
 async function verifyPhone(state, phone) {
   const digits = (phone || '').replace(/\D/g, '');
   if (digits.length < 9) return null;
@@ -201,9 +201,9 @@ async function runInternal(industryConfig) {
   const config = {
     SERPER_API_KEYS:     poolKeys.length ? poolKeys : BOOTSTRAP_SERPER_KEYS,
     SERPER_REQUEST_CAP:  parseInt(process.env.SERPER_REQUEST_CAP) || 2000,
-    SCRAPINGBEE_API_KEY: process.env.SCRAPINGBEE_API_KEY || 'CXBUX27L6I5GVSLD0VOCI2WY1X2KMN7UWYWO5HF3LZMILEOZFWDAWBMLM2LP39C254BD0YXBL9WX0EPB',
-    TWILIO_SID:          process.env.TWILIO_SID          || 'ACafd5287a596607aa225236a755ededb6',
-    TWILIO_TOKEN:        process.env.TWILIO_TOKEN        || 'd3410a481413b97a371c7b0ffab111ae',
+    SCRAPINGBEE_API_KEY: process.env.SCRAPINGBEE_API_KEY || '',
+    TWILIO_SID:          process.env.TWILIO_SID          || '',
+    TWILIO_TOKEN:        process.env.TWILIO_TOKEN        || '',
     BRAVE_API_KEY:       process.env.BRAVE_API_KEY       || '',
     HOT_COUNT:           70,
     ALL_COUNT:           30,
