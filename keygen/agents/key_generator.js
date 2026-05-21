@@ -18,9 +18,10 @@ const path  = require('path');
 // Temp-email providers use certs Node.js can't verify from its bundled CAs
 const axiosNoVerify = axios.create({ httpsAgent: new https.Agent({ rejectUnauthorized: false }) });
 
-const ROOT        = path.join(__dirname, '..');
-const LOCK_FILE   = path.join(ROOT, '.keygen.lock');
-const PROFILE_DIR = path.join(ROOT, '.serper_profile');
+const ROOT         = path.join(__dirname, '..');
+const PROJECT_ROOT = path.join(__dirname, '..', '..');
+const LOCK_FILE    = path.join(ROOT, '.keygen.lock');
+const PROFILE_DIR  = path.join(ROOT, '.serper_profile');
 const WIT_API_KEY = 'QHOSR47F2SBIRITIV5MCK4NLYMZFFREK';
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -765,7 +766,7 @@ async function generateSerperKey() {
     try { fs.unlinkSync(path.join(PROFILE_DIR, 'Default', f)); } catch {}
   }
 
-  const NOPECHA_EXT = path.join(ROOT, '.nopecha_ext');
+  const NOPECHA_EXT = path.join(PROJECT_ROOT, '.nopecha_ext');
   const hasNopecha = fs.existsSync(NOPECHA_EXT);
   if (hasNopecha) console.log('🤖 [Auto-Key] NopeCHA extension loaded — CAPTCHA will be auto-solved.');
 
@@ -1141,7 +1142,7 @@ async function generateSerperKey() {
     }
 
     if (newKey) {
-      const KeyManager = require('../key_manager');
+      const KeyManager = require('../../key_manager');
       const addResult  = await KeyManager.addKey(newKey);
 
       if (addResult === 'duplicate') {

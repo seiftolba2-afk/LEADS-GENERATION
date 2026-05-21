@@ -3,13 +3,14 @@ const { spawn } = require('child_process');
 const fs        = require('fs');
 const path      = require('path');
 
-const ROOT      = __dirname;
+const ROOT         = __dirname;
+const PROJECT_ROOT = path.join(__dirname, '..');
 const STOP_FILE = path.join(ROOT, '.keygen.stop');
 const LOCK_FILE = path.join(ROOT, '.keygen.lock');
 
 function checkKeyState() {
   try {
-    const keys = JSON.parse(fs.readFileSync(path.join(ROOT, 'serper_keys.json'), 'utf8'));
+    const keys = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'serper_keys.json'), 'utf8'));
     return {
       live:  keys.filter(k => k.status === 'ok').length,
       quota: keys.filter(k => k.status === 'quota').length,
